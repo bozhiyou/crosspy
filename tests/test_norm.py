@@ -22,20 +22,20 @@ def timing(test):
 DIM = int(16_000) # 256 million
 
 
-@timing
-def test_norm(npa, cpa):
-    print(cp.linalg.norm(cp.asarray(npa)))
-    print(np.linalg.norm(cp.asnumpy(cpa)))
-
-
-@timing
-def test_norm_xp(xpa):
-    # TODO xp.linalg.norm(xpa)
-    print(np.linalg.norm(xpa[:DIM].to(0)))
-    print(cp.linalg.norm(xpa[DIM:].to(-1)))
-
-
 if __name__ == '__main__':
+    @timing
+    def test_norm(npa, cpa):
+        print(cp.linalg.norm(cp.asarray(npa)))
+        print(np.linalg.norm(cp.asnumpy(cpa)))
+
+
+    @timing
+    def test_norm_xp(xpa):
+        # TODO xp.linalg.norm(xpa)
+        print(np.linalg.norm(xpa[:DIM].to(0)))
+        print(cp.linalg.norm(xpa[DIM:].to(-1)))
+
+
     import numpy as np
     import cupy as cp
 

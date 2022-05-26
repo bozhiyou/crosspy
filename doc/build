@@ -1,0 +1,10 @@
+#!/bin/sh
+SPHINXOPTS="-nW"
+SPHINXBUILD=sphinx-build
+SOURCEDIR=./source
+BUILDDIR=${HOME}/public_html/crosspy
+
+rm -rf ${SOURCEDIR}/generated/
+make clean
+${SPHINXBUILD} -nW -b html ${SOURCEDIR} ${BUILDDIR}
+make doctest

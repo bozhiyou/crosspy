@@ -19,34 +19,84 @@ logger = _get_logger(
 
 
 import crosspy as xp
+from crosspy import PartitionScheme
 from crosspy import numpy as np
 from crosspy import cupy as cp
 
+
+import cupy as cp
+import crosspy as xp
+
+
+with cp.cuda.Device(0):
+    a1 = cp.arange(5)
+with cp.cuda.Device(1):
+    a2 = cp.arange(3)
+
+left_array = xp.array([a1, a2], dim=0)
+print("array: ", left_array)
+print("array 0:2 : ", left_array[4])
+
+
+
+
+x_cpu = np.array([1, 2, 3])
+x_gpu = cp.array([4, 5])
+x_cross = xp.array([x_cpu, x_gpu], dim=0)
+print(x_cross)
+
+for i, parray_list in enumerate(x_cross.device_view()):
+    print(i, ", ", type(parray_list), ", ", parray_list)
+
+
+def main(T):
+
+    # Per device size
+    m = 5
+
+    global_size = m * 2
+    global_array = np.arange(global_size, dtype=np.int32)
+    np.random.shuffle(global_array)
+
+    print(global_array)
+
+    partition = xp.PartitionScheme(global_size, default_device=gpu(0))
+
+    #This also gives errors without or without 
+    #for i in range(global_size):
+    #    partition[i] = gpu(0)
+
+    A = xp.array(global_array, partition=partition)
+
+    print(A)
+
+
+
+if __name__ == "__main__":
+    T = None
+    main(T)
+
+
+
 if __name__ == '__main__':
-    x = xp.array([np.array([2,4,6,8]), np.array([1,3,5,7])], dim=0)
-    print(x)
+    partition_2 = PartitionScheme(3, default_device=xp.gpu(0))
+    partition_2[0:3] = xp.gpu(0)
+    a = xp.array(np.array([1, 2, 3]), partition=partition_2)
 
-    print(x[-1])
-    print(x.shape)
+    # a = xp.array([[np.full((2,2), i*2+j) for j in range(2)] for i in range(2)])
+    A = xp.array(range(10), placement=[xp.cpu(0), xp.gpu(0)])
+    B = xp.array(range(10), placement=[xp.cpu(0), xp.gpu(0), xp.gpu(1)])
+    A[1:5] = B[4:9]
 
-    # boundaries = (4, 8)
-    # def part(i):
-    #     return slice(0 if i == 0 else boundaries[i-1], boundaries[i])
-    # num_gpus = 2
-    # def quick_sort(a):
-    #     pivot = a[-1]
-    #     for di in range(num_gpus):
-    #         with cp.cuda.Device(di):
-                
-
-    # raise
-
-
-
-
-
-
-
+    A = np.arange(64).reshape(8, 8)
+    A_cross = xp.array(A, placement=[xp.gpu(0), xp.gpu(1), xp.gpu(2), xp.gpu(3)])
+    print(A_cross)
+    blocks = 4
+    block_size = 2
+    for d in range(blocks):
+        for j in range(blocks):
+            a_block = A_cross[d*block_size:(d+1)*block_size, j*block_size:(j+1)*block_size]
+            print(a_block)
 
     from crosspy import cpu, gpu, PartitionScheme
     # a = xp.array(range(6), placement=[cpu(0), gpu(0), gpu(1)])

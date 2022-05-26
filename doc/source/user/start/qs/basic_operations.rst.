@@ -1,0 +1,91 @@
+Basic Operations
+----------------
+
+CrossPy arrays support common arithmetic operations without worrying about the
+underlying data distribution.
+
+>>> import crosspy as xp
+>>> import numpy as np
+>>> import cupy as cp
+>>> a = xp.array([cp.arange(3), np.arange(2)], axis=0)
+>>> a  # doctest: +NORMALIZE_WHITESPACE
+array {((0, 3),): array([0, 1, 2]), ((3, 5),): array([0, 1])}
+>>> a[0] = a[2] + a[4]
+>>> a  # doctest: +NORMALIZE_WHITESPACE
+array {((0, 1),): array([6]),
+       ((1, 3),): array([1, 2]),
+       ((3, 4),): array([3]),
+       ((4, 6),): array([4, 5])}
+
+.. note::
+       While performing arithmetic operations, the operator only knows about the
+       `source` operands, including their residing devices, but not the `destination`
+       where the result of the arithmetic operation will be assigned to. There
+       is also no way to specify the canonical device among those of the operands.
+       Therefore, CrossPy by default performs the operation on the device of
+       the `first`/`left` operand (thus the "canonical device"), pulling operands
+       on other devices. If the canonical device is different from that of the
+       destination, an unavoidable copy will occur.
+
+
+Interoperability with NumPy/CuPy
+--------------------------------
+
+CrossPy arrays can be assigned value(s) from/to NumPy/CuPy arrays.
+
+When assigning values from NumPy/CuPy arrays to CrossPy arrays, there are two
+possible behaviors. The first one scatters the data from the source array to the
+underlying devices of the CrossPy array, i.e., the heterogeneity of the CrossPy
+array is unchanged. The second one overwrites the corresponding part of the
+target array with both the data and the device of the source array. The built-in
+assignment operation in Python is not overloadable and we chose to implement it
+with the scatter behavior.
+
+>>> x_cross[0] = np.array([5, 4, 3, 2, 1])
+>>> x_cross # doctest: +NORMALIZE_WHITESPACE
+array {((0, 1), (0, 3)): array([[5, 4, 3]]),
+       ((0, 1), (3, 5)): array([[2, 1]])}
+>>> x_cross[0] = cp.array([6, 7, 8, 9, 0])
+>>> x_cross # doctest: +NORMALIZE_WHITESPACE
+array {((0, 1), (0, 3)): array([[6, 7, 8]]),
+       ((0, 1), (3, 5)): array([[9, 0]])}
+
+For assigning values from CrossPy arrays to NumPy/CuPy arrays, since the target
+is distinguishable by devices (NumPy arrays are always on CPU while CuPy arrays are
+on GPU devices), we use ``to`` to convert the array. We simply use negative integers
+as CPU devices and otherwise GPU devices.
+
+>>> y_cpu = x_cross.to(-1)
+>>> y_cpu
+array([[6, 7, 8, 9, 0]])
+>>> type(y_cpu)
+<class 'numpy.ndarray'>
+
+>>> y_gpu0 = x_cross[:1, (0, 2, 4)].to(0)
+>>> y_gpu0
+array([[6, 8, 0]])
+>>> type(y_gpu0)
+<class 'cupy.core.core.ndarray'>
+>>> y_gpu0.device
+<CUDA Device 0>
+
+>>> y_gpu1 = x_cross.to(1)
+>>> y_gpu1
+array([[6, 7, 8, 9, 0]])
+>>> type(y_gpu1)
+<class 'cupy.core.core.ndarray'>
+>>> y_gpu1.device
+<CUDA Device 1>
+
+With ``to``, we can use NumPy/CuPy computational functions as usual.
+
+>>> np.linalg.norm(x_cross.to(-1))
+15.165750888103101
+>>> cp.linalg.norm(x_cross.to(0))
+array(15.16575089)
+
+.. note::
+    It seems tedious to have the ugly tail ``to``. However, third-party APIs always
+    have fixed signatures and those in CuPy for example is inherently not compatible
+    with CrossPy objects (same with NumPy). Therefore, an explicit operation is
+    necessary to satisfy the input requirements of third-party APIs.
