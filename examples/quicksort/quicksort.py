@@ -27,11 +27,11 @@ def quicksort(array, out=None):
         out[len(left)] = pivot
         if len(left):
             quicksort(left)
-            xp.assignment(out, cp.arange(len(left)), left, None)
+            xp.assignment(out, slice(0, len(left)), left, None)
             # out[cp.arange(len(left))] = left
         if len(right):
             quicksort(right)
-            xp.assignment(out, cp.arange(len(left) + 1, len(array)), right, None)
+            xp.assignment(out, slice(len(left) + 1, len(array)), right, None)
             # out[cp.arange(len(left) + 1, len(array))] = right
 
 

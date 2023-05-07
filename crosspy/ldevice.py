@@ -46,11 +46,8 @@ class PartitionScheme:
     NO_DEVICE = -1
     _device_vocab = []
 
-    def __init__(self, target_shape, *, default_device=None):
+    def __init__(self, target_shape):
         self._shape = target_shape
-        # self._default_device_id = default_device and self._get_device_id(default_device)
-        if default_device:
-            warnings.warn(PendingDeprecationWarning("default_device DOES NOT TAKE EFFECT IN THIS VERSION"))
         self._devid_to_index = defaultdict(list)  # device id -> []
         self._keys = {}
 
@@ -67,7 +64,7 @@ class PartitionScheme:
         return (self.get_device(did) for did in self._devid_to_index.keys())
 
     def get_key(self, i):
-        return self._keys[i][1]
+        return self._keys[sorted(self._keys.keys())[i]]
 
     def _get_device_id(self, device):
         try:
@@ -125,7 +122,7 @@ class LDeviceSequenceArbitrary:
         )
     
     def memory(self, data, kind: Optional[MemoryKind] = None):
-        self._scheme._keys = sorted(self._scheme._keys.items(), key=lambda x: x[0])
+        # self._scheme._keys = sorted(self._scheme._keys.items(), key=lambda x: x[0])
         moved_data = {}
         for dev_id, indices in self._scheme._devid_to_index.items():
             device = self._scheme.get_device(dev_id)
