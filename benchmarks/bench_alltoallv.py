@@ -4,6 +4,7 @@ import crosspy as xp
 
 import time
 
+GB64 = 2**(30-3)
 
 def simple_uniform_cut(arr, num_gpus) -> list:
     arr_parts = []
@@ -19,10 +20,17 @@ def simple_uniform_cut(arr, num_gpus) -> list:
     return arr_parts
 
 
+def equally_distributed_indices(size_a, size_b, ngpu_a, ngpu_b):
+    distribution = np.tile(range(ngpu_b), size_b // ngpu_b + 1)[:size_b]
+    indices = np.arange(size_a)
+    return np.concatenate([indices[distribution == i] for i in range(ngpu_b)])
+
+
+
 def bench_alltoallv(size_a=12, size_b=12, ngpu_a=2, ngpu_b=2):
     a = np.random.rand(size_a)
-    print(a.nbytes/2**30)
-    indices = np.random.choice(size_a, size_b, replace=False)
+    # indices = np.random.choice(size_a, size_b, replace=False)
+    indices = equally_distributed_indices(size_a, size_b, ngpu_a, ngpu_b)
     b = a[indices]
 
     a_parts = simple_uniform_cut(a, ngpu_a)
@@ -31,10 +39,10 @@ def bench_alltoallv(size_a=12, size_b=12, ngpu_a=2, ngpu_b=2):
     b_parts = simple_uniform_cut(b, ngpu_b)
     xb = xp.array(b_parts, axis=0)
 
-    start = time.time()
+    start = time.perf_counter()
     xp.alltoallv(xa, indices, xb)
-    end = time.time()
-    print(end - start)
+    end = time.perf_counter()
+    print(','.join(str(x) for x in [a.nbytes/2**30, b.nbytes/2**30, ngpu_a, ngpu_b, end - start]))
 
 
 if __name__ == '__main__':
@@ -45,4 +53,9 @@ if __name__ == '__main__':
     parser.add_argument('-p', type=int, default=4, help='Number of GPUs for source matrix')
     parser.add_argument('-q', type=int, default=4, help='Number of GPUs for target matrix')
     args = parser.parse_args()
-    bench_alltoallv(args.n, args.m, args.p, args.q)
+    # bench_alltoallv(args.n, args.m, args.p, args.q)
+
+    n = m = 1 * GB64
+    p = 1
+    for q in range(1, 5):
+      bench_alltoallv(n, m, p, q)

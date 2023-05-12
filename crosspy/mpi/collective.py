@@ -35,7 +35,7 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     sendbuf [[] [] []]
     sdispls [. . .]
     """
-    source_bounds = sendbuf._bounds
+    source_bounds = sendbuf.boundaries
     target_bounds = recvbuf.boundaries
 
     @lru_cache(maxsize=len(recvbuf.block_view()))
