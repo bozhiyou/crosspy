@@ -3,6 +3,9 @@ tests/data
 # IDE
 .vscode/
 
+# Benchmarking
+benchmarks/.asv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
