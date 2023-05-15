@@ -1,32 +1,65 @@
 from contextlib import nullcontext
 from functools import lru_cache
 
+import numpy
 from crosspy import cupy
 
-def pull(array, context):
+def _pinned_memory_empty_like(array):
+    if cupy and isinstance(array, numpy.ndarray):
+        mem = cupy.cuda.alloc_pinned_memory(array.nbytes)
+        ret = numpy.frombuffer(mem, array.dtype, array.size).reshape(array.shape)
+        return ret
+    return array
+
+def _pin_memory(array):
+    ret = _pinned_memory_empty_like(array)
+    ret[...] = array
+    return ret
+
+def same_place(x, y):
+    return type(x) == type(y) and (
+        isinstance(x, numpy.ndarray) or (
+        cupy and isinstance(x, cupy.ndarray) and x.device == y.device
+    ))
+
+    
+def any_to_cuda(array, stream, out=None):
+    if out is None:
+        out = cupy.empty(array.shape, dtype=array.dtype)
+    if isinstance(array, numpy.ndarray):  # Copy CPU to GPU
+        out.set(array, stream=stream)
+    elif isinstance(array, cupy.ndarray):  # Copy GPU to GPU
+        out.data.copy_from_device_async(array.data, array.nbytes, stream=stream)
+    else:
+        raise NotImplementedError("Transferring %s object to gpu is not supported yet" % type(array))
+    return out
+
+
+def pull(array, context, stream_src=None):
     # Assume device >= 0 means the device is a GPU, device < 0 means the device is a CPU.
     source_device = getattr(array, 'device', None)
-    if source_device == context:
+    if source_device == context or (not hasattr(array, 'device') and isinstance(context, nullcontext)):
         return array
 
+    # to CPU
     if isinstance(context, nullcontext):
         if source_device:  # GPU to CPU
             with source_device:
                 with cupy.cuda.Stream(non_blocking=True) as stream:
-                    membuffer = cupy.asnumpy(array, stream=stream)
+                    membuffer = _pinned_memory_empty_like(array)
+                    array.get(stream=stream, out=membuffer)
                     stream.synchronize()
             return membuffer
         return array  # CPU to CPU
 
+    # to GPU
     with context:
-        with cupy.cuda.Stream(non_blocking=True) as stream:
-            membuffer = cupy.empty(array.shape, dtype=array.dtype)
-            if source_device:  # Copy GPU to GPU
-                membuffer.data.copy_from_device_async(array.data, array.nbytes, stream=stream)
-            else:  # Copy CPU to GPU
-                membuffer.set(array, stream=stream)
-            stream.synchronize()
-            return membuffer
+        membuffer = cupy.empty(array.shape, dtype=array.dtype)
+        with cupy.cuda.Stream(non_blocking=True) as stream_dst:
+            any_to_cuda(array, stream=stream_src or stream_dst, out=membuffer)
+            if stream_src: stream_src.synchronize()
+            stream_dst.synchronize()
+        return membuffer
 
 pull_to = lambda context: (lambda array: pull(array, context))
 
@@ -34,33 +67,103 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     """
     sendbuf [[] [] []]
     sdispls [. . .]
-    """
-    source_bounds = sendbuf.boundaries
-    target_bounds = recvbuf.boundaries
 
-    @lru_cache(maxsize=len(recvbuf.block_view()))
-    def index_for_j(j):
-        with getattr(sdispls, 'device', nullcontext()):
-            sdispls_j = sdispls[(target_bounds[j-1] if j else 0):target_bounds[j]] if recvbuf.heteroaxis is not None else sdispls
-            source_block_ids = sendbuf._global_index_to_block_id(sdispls_j)
-        return sdispls_j, source_block_ids
+    indices size = recv size
 
+    --- old implementation ---
     for i, send_block in enumerate(sendbuf.block_view()):
         for j, recv_block in enumerate(recvbuf.block_view()):
+            sdispls_j, source_block_ids_j = index_for_j(j)
             # gather
             with getattr(send_block, 'device', nullcontext()) as context:
                 pull_here = pull_to(context)
-                sdispls_j, source_block_ids = index_for_j(j)
-                gather_mask = (pull_here(source_block_ids) == i)
+                gather_mask = (pull_here(source_block_ids_j) == i)
                 gather_indices_local = pull_here(sdispls_j)[gather_mask] - (source_bounds[i-1] if i else 0)
-                # assert sum(scatter_mask) == len(gather_indices_local)
-                buf = send_block[gather_indices_local]
+                # assert sum(gather_mask) == len(gather_indices_local)
+                send_buf = send_block[gather_indices_local]
             # scatter
             with getattr(recv_block, 'device', nullcontext()) as context:
                 pull_here = pull_to(context)
                 scatter_mask = pull_here(gather_mask)
-                assert not debug or cupy.allclose(recv_block[scatter_mask], pull_here(buf))
-                recv_block[scatter_mask] = pull_here(buf)
+                assert not debug or cupy.allclose(recv_block[scatter_mask], pull_here(send_buf))
+                recv_block[scatter_mask] = pull_here(send_buf)
+    """
+    source_bounds = sendbuf.boundaries
+    target_bounds = recvbuf.boundaries
+
+    # if isinstance(sdispls, numpy.ndarray):
+    #     sdispls = _pin_memory(sdispls)
+    #     source_block_ids = _pinned_memory_empty_like(sdispls)
+    #     sendbuf._global_index_to_block_id(sdispls, out=source_block_ids)
+    # elif cupy and isinstance(sdispls, cupy.ndarray):
+    #     source_block_ids = sendbuf._global_index_to_block_id(sdispls)
+    # else:
+    #     raise TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(sdispls))
+
+    recv_cache = []
+    for j, recv_block in enumerate(recvbuf.block_view()):
+        with getattr(recv_block, 'device', nullcontext()) as context:
+            with cupy.cuda.Stream(non_blocking=True) as s_recv:
+                j_range = slice((target_bounds[j-1] if j else 0), target_bounds[j])
+                sdispls_j = any_to_cuda(sdispls[j_range], stream=s_recv)
+                source_block_ids_j = sendbuf._global_index_to_block_id(sdispls_j)
+            recv_cache.append((s_recv, sdispls_j, source_block_ids_j))
+
+    streams = []
+    for i, send_block in enumerate(sendbuf.block_view()):
+        for j, recv_block in enumerate(recvbuf.block_view()):
+            with getattr(recv_block, 'device', nullcontext()) as context:
+                s_recv, sdispls_j, source_block_ids_j = recv_cache[j]
+                with s_recv:
+                    mask = (source_block_ids_j == i)
+                    gather_indices_local = sdispls_j[mask] - (source_bounds[i-1] if i else 0)
+
+                    if len(gather_indices_local) >= len(send_block) // 2:
+                        # one hop communication: transfer whole block
+                        if not same_place(send_block, recv_block):
+                            recv_buf = cupy.empty_like(send_block)
+                            with getattr(send_block, 'device', nullcontext()) as context:
+                                with cupy.cuda.Stream(non_blocking=True) as s_src:
+                                    any_to_cuda(send_block, stream=s_src, out=recv_buf)
+                            s_src.synchronize()
+                        else:
+                            recv_buf = send_block
+                        assert not debug or cupy.allclose(recv_block[mask], recv_buf[gather_indices_local])
+                        recv_block[mask] = recv_buf[gather_indices_local]
+                    else:
+                        # two hop communication: transfer indices then transfer slices
+                        with getattr(send_block, 'device', nullcontext()) as context:
+                            with cupy.cuda.Stream(non_blocking=True) as s_src:  # TODO no stream for host
+                                if not same_place(gather_indices_local, send_block):
+                                    gather_indices_local_send = cupy.empty_like(gather_indices_local)
+                                    with getattr(recv_block, 'device', nullcontext()) as context:
+                                        with s_recv:
+                                            any_to_cuda(gather_indices_local, stream=s_recv, out=gather_indices_local_send)
+                                        s_recv.synchronize()
+                                else:
+                                    gather_indices_local_send = gather_indices_local
+                                # assert sum(gather_mask) == len(gather_indices_local)
+                                send_buf = send_block[gather_indices_local_send]
+
+                        with getattr(recv_block, 'device', nullcontext()) as context:
+                            with s_recv:
+                                # gather_mask, send_buf = msgs[i][j]
+                                if not same_place(send_buf, recv_block):
+                                    recv_buf = cupy.empty_like(send_buf)
+                                    with getattr(send_block, 'device', nullcontext()) as context:
+                                        with s_src:  # cupy.cuda.Stream(non_blocking=True) as s0:
+                                            any_to_cuda(send_buf, stream=s_src, out=recv_buf)
+                                    s_src.synchronize()
+                                else:
+                                    recv_buf = send_buf
+                                assert not debug or cupy.allclose(recv_block[mask], recv_buf), recv_buf
+                                recv_block[mask] = recv_buf
+                        
+                streams.append(s_recv)
+    
+    for s in streams:
+        s.synchronize()
+
 
 def all2ints(src, dest, dest_index, debug=False):
     """

@@ -26,7 +26,6 @@ from warnings import warn
 from .core.ndarray import IndexType
 from .device import Device, Memory, MemoryKind
 from .placement import PlacementSource, get_placement_for_any
-from crosspy.mapping import ArrayMapping
 
 
 def _first_i(index) -> int:

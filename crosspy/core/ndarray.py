@@ -195,10 +195,10 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
         if not isinstance(self._original_data, (list, tuple)):
             assert self._concat_axis is None
             return {tuple((0, s) for s in self.shape): self._original_data}
-        
+
         if len(self._original_data) == 0:
             return {}
-        
+
         subshape = self._original_data[0].shape
         if self._concat_axis is None:
             return {((i, i+1), (*([0] * len(subshape)), *subshape)): self._original_data[i] for i in range(len(self._original_data))}
@@ -222,7 +222,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
     @property
     def ndevices(self) -> int:
         return len(self._device_to_indices)
-    
+
     @property
     def dtype(self) -> type:
         return self._dtype
@@ -236,7 +236,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
         if self._concat_axis is not None:
             return self._bounds
         return numpy.array(self._shape)
-    
+
     @property
     def heteroaxis(self):
         return self._concat_axis
@@ -254,7 +254,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
 
     def monolithic(self) -> bool:
         return self._concat_axis is None
-    
+
     def on(self, device) -> list:
         if isinstance(device, (*self._device_types, str)):
             return self._device_to_indices.get(repr(device), [])
@@ -284,7 +284,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
         if self._shape != ():
             raise IndexError("cannot get item from non-scalars")
         return self.data_map.get(())
-    
+
     def __bool__(self) -> bool:
         return bool(self._original_data)
 
@@ -349,18 +349,29 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
             return target.to_dict()[((l, r),)] # TODO handle general bool mask
         return None
 
-    def _global_index_to_block_id(self, i):
+    def _global_index_to_block_id(self, i, out=None):
         """
         Computes which block the referred element resides in
-        Return shape is same to input
+
+        Return shape and device is same to input indices unless out is given
         """
-        try:
-            lib = get_array_module(i)
-            bounds = lib.asarray(self.boundaries)
-        except:
-            lib = numpy
-            bounds = self.boundaries
-        return lib.sum(lib.expand_dims(i, axis=-1) >= bounds, axis=-1, keepdims=False)
+        if isinstance(i, numpy.ndarray):
+            if out is not None:
+                numpy.sum(numpy.expand_dims(i, axis=-1) >= self.boundaries, axis=-1, keepdims=False, out=out)
+                return
+            return numpy.sum(numpy.expand_dims(i, axis=-1) >= self.boundaries, axis=-1, keepdims=False)
+        if cupy and isinstance(i, cupy.ndarray):
+            expanded_i = cupy.expand_dims(i, axis=-1)
+            with cupy.cuda.Stream(non_blocking=True) as s:
+                # TODO pin boundaries once
+                d_bounds = cupy.empty_like(self.boundaries)
+                d_bounds.set(self.boundaries)
+                s.synchronize()
+            if out is not None:
+                cupy.sum(expanded_i >= d_bounds, axis=-1, keepdims=False, out=out)
+                return
+            return cupy.sum(expanded_i >= d_bounds, axis=-1, keepdims=False)
+        raise TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(i))
 
     def _indexing_check(self, index: IndexType):
         """Check before set and get item"""
@@ -410,7 +421,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
             [_meta_check(i, self._shape[d]) for d, i in enumerate(index)]
         ):
             raise TypeError("index out of range")
-        
+
 
     def get_raw_item_by_slice(self, slice_):
         left, head_start = self._locate(slice_.start)
@@ -455,7 +466,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
         # FIXME: ad hoc, should deal with negative indices
         if self._concat_axis == 0 and isinstance(index, int) and index == -1:
             return self._original_data[-1][-1]
-        
+
         index = self._indexing_check(index)
 
         if len(self._lazy_movement):
@@ -916,7 +927,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
         else:
             # one return value
             return type(self)(result)  # self.__class__(result)
-        
+
         return NotImplemented
 
     def __array_function__(self, func, types, args, kwargs):

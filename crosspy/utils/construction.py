@@ -1,6 +1,9 @@
 from typing import Callable
 
 def recipe(array_lambda: Callable, device_lambda: Callable, **params):
+    """
+    Place each array from calling `array_lambda` on device from calling `device_lambda`.
+    """
     result = []
     if not params:
         for device in device_lambda():
