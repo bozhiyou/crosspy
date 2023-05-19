@@ -4,24 +4,18 @@ import logging
 from functools import wraps, lru_cache
 from typing import Dict, List
 
+from crosspy.device.device import Architecture
+
 from ..device import MemoryKind, Memory, Architecture, Device
 
 import numpy
 
 logger = logging.getLogger(__name__)
 
-try:
-    import cupy
-    import cupy.cuda
-except (ImportError, AttributeError):
-    import inspect
-    # Ignore the exception if the stack includes the doc generator
-    if all(
-        "sphinx" not in f.filename
-        for f in inspect.getouterframes(inspect.currentframe())
-    ):
-        raise
-    cupy = None
+import cupy
+import cupy.cuda
+
+from math import log2
 
 __all__ = ["gpu", "cupy"]
 
@@ -95,6 +89,15 @@ class _GPUMemory(Memory):
 # from ..environments import EnvironmentComponent  # for inheritance
 # from . import component
 class _GPUDevice(Device):
+    def __init__(self, architecture: "_GPUArchitecture", index, *args, **kwds):
+        try:
+            with cupy.cuda.Device(index) as d:
+                with cupy.cuda.Stream(non_blocking=True):
+                    cupy.cuda.alloc(2 ** min(30, int(log2(d.mem_info[0]))))
+        except Exception as e:
+            raise RuntimeError(e.args[0] + " %d" % index)
+        super().__init__(architecture, index, *args, **kwds)
+
     @property
     @lru_cache(None)
     def resources(self) -> Dict[str, float]:

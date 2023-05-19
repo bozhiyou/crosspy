@@ -92,7 +92,7 @@ class Device(metaclass=ABCMeta):
         """
         Construct a new Device with a specific architecture.
         """
-        self.architecture = architecture  # parla.cpu_impl.cpu or parla.cuda.gpu TODO(yineng): more architectures could be added in the future
+        self.architecture = architecture
         self.index = index  # index of gpu
         self.args = args
         self.kwds = kwds

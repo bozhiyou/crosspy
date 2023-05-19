@@ -355,23 +355,25 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
 
         Return shape and device is same to input indices unless out is given
         """
-        if isinstance(i, numpy.ndarray):
-            if out is not None:
-                numpy.sum(numpy.expand_dims(i, axis=-1) >= self.boundaries, axis=-1, keepdims=False, out=out)
-                return
-            return numpy.sum(numpy.expand_dims(i, axis=-1) >= self.boundaries, axis=-1, keepdims=False)
-        if cupy and isinstance(i, cupy.ndarray):
-            expanded_i = cupy.expand_dims(i, axis=-1)
+        if isinstance(i, (int, numpy.integer, numpy.ndarray)):
+            if isinstance(i, numpy.ndarray):
+                i = numpy.expand_dims(i, axis=-1)
+            d_bounds = self.boundaries
+            lib = numpy
+        elif cupy and isinstance(i, cupy.ndarray):
+            i = cupy.expand_dims(i, axis=-1)
             with cupy.cuda.Stream(non_blocking=True) as s:
                 # TODO pin boundaries once
                 d_bounds = cupy.empty_like(self.boundaries)
                 d_bounds.set(self.boundaries)
                 s.synchronize()
-            if out is not None:
-                cupy.sum(expanded_i >= d_bounds, axis=-1, keepdims=False, out=out)
-                return
-            return cupy.sum(expanded_i >= d_bounds, axis=-1, keepdims=False)
-        raise TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(i))
+            lib = cupy
+        else:
+            raise TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(i))
+        if out is not None:
+            lib.sum(i >= d_bounds, axis=-1, keepdims=False, out=out)
+            return
+        return lib.sum(i >= d_bounds, axis=-1, keepdims=False)
 
     def _indexing_check(self, index: IndexType):
         """Check before set and get item"""

@@ -91,18 +91,12 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     source_bounds = sendbuf.boundaries
     target_bounds = recvbuf.boundaries
 
-    # if isinstance(sdispls, numpy.ndarray):
-    #     sdispls = _pin_memory(sdispls)
-    #     source_block_ids = _pinned_memory_empty_like(sdispls)
-    #     sendbuf._global_index_to_block_id(sdispls, out=source_block_ids)
-    # elif cupy and isinstance(sdispls, cupy.ndarray):
-    #     source_block_ids = sendbuf._global_index_to_block_id(sdispls)
-    # else:
-    #     raise TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(sdispls))
+    if isinstance(sdispls, numpy.ndarray):
+        sdispls = _pin_memory(sdispls)
 
     recv_cache = []
     for j, recv_block in enumerate(recvbuf.block_view()):
-        with getattr(recv_block, 'device', nullcontext()) as context:
+        with getattr(recv_block, 'device', nullcontext()) as recv_device:
             with cupy.cuda.Stream(non_blocking=True) as s_recv:
                 j_range = slice((target_bounds[j-1] if j else 0), target_bounds[j])
                 sdispls_j = any_to_cuda(sdispls[j_range], stream=s_recv)
@@ -112,17 +106,17 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     streams = []
     for i, send_block in enumerate(sendbuf.block_view()):
         for j, recv_block in enumerate(recvbuf.block_view()):
-            with getattr(recv_block, 'device', nullcontext()) as context:
+            with getattr(recv_block, 'device', nullcontext()) as recv_device:
                 s_recv, sdispls_j, source_block_ids_j = recv_cache[j]
                 with s_recv:
                     mask = (source_block_ids_j == i)
                     gather_indices_local = sdispls_j[mask] - (source_bounds[i-1] if i else 0)
 
-                    if len(gather_indices_local) >= len(send_block) // 2:
+                    if len(gather_indices_local) >= (len(send_block) // 2):
                         # one hop communication: transfer whole block
                         if not same_place(send_block, recv_block):
                             recv_buf = cupy.empty_like(send_block)
-                            with getattr(send_block, 'device', nullcontext()) as context:
+                            with getattr(send_block, 'device', nullcontext()) as send_device:
                                 with cupy.cuda.Stream(non_blocking=True) as s_src:
                                     any_to_cuda(send_block, stream=s_src, out=recv_buf)
                             s_src.synchronize()
@@ -132,11 +126,11 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
                         recv_block[mask] = recv_buf[gather_indices_local]
                     else:
                         # two hop communication: transfer indices then transfer slices
-                        with getattr(send_block, 'device', nullcontext()) as context:
+                        with getattr(send_block, 'device', nullcontext()) as send_device:
                             with cupy.cuda.Stream(non_blocking=True) as s_src:  # TODO no stream for host
                                 if not same_place(gather_indices_local, send_block):
                                     gather_indices_local_send = cupy.empty_like(gather_indices_local)
-                                    with getattr(recv_block, 'device', nullcontext()) as context:
+                                    with getattr(recv_block, 'device', nullcontext()) as recv_device:
                                         with s_recv:
                                             any_to_cuda(gather_indices_local, stream=s_recv, out=gather_indices_local_send)
                                         s_recv.synchronize()
@@ -145,12 +139,12 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
                                 # assert sum(gather_mask) == len(gather_indices_local)
                                 send_buf = send_block[gather_indices_local_send]
 
-                        with getattr(recv_block, 'device', nullcontext()) as context:
+                        with getattr(recv_block, 'device', nullcontext()) as recv_device:
                             with s_recv:
                                 # gather_mask, send_buf = msgs[i][j]
                                 if not same_place(send_buf, recv_block):
                                     recv_buf = cupy.empty_like(send_buf)
-                                    with getattr(send_block, 'device', nullcontext()) as context:
+                                    with getattr(send_block, 'device', nullcontext()) as send_device:
                                         with s_src:  # cupy.cuda.Stream(non_blocking=True) as s0:
                                             any_to_cuda(send_buf, stream=s_src, out=recv_buf)
                                     s_src.synchronize()
