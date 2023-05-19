@@ -91,6 +91,7 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     source_bounds = sendbuf.boundaries
     target_bounds = recvbuf.boundaries
 
+    # Stage 1: indices distribution
     if isinstance(sdispls, numpy.ndarray):
         sdispls = _pin_memory(sdispls)
 
@@ -100,9 +101,16 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
             with cupy.cuda.Stream(non_blocking=True) as s_recv:
                 j_range = slice((target_bounds[j-1] if j else 0), target_bounds[j])
                 sdispls_j = any_to_cuda(sdispls[j_range], stream=s_recv)
-                source_block_ids_j = sendbuf._global_index_to_block_id(sdispls_j)
-            recv_cache.append((s_recv, sdispls_j, source_block_ids_j))
+            recv_cache.append([s_recv, sdispls_j])
 
+    for j, recv_block in enumerate(recvbuf.block_view()):
+        with getattr(recv_block, 'device', nullcontext()) as recv_device:
+            s_recv, sdispls_j = recv_cache[j]
+            with s_recv:
+                source_block_ids_j = sendbuf._global_index_to_block_id(sdispls_j)
+            recv_cache[j].append(source_block_ids_j)
+
+    # copy
     streams = []
     for i, send_block in enumerate(sendbuf.block_view()):
         for j, recv_block in enumerate(recvbuf.block_view()):
