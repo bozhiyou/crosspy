@@ -1,14 +1,14 @@
-import logging
 from typing import Dict
 
 import os
 import psutil
 
-from crosspy import array
+from crosspy.utils import array
 from ..device import Architecture, Memory, Device, MemoryKind
 
 __all__ = ["cpu"]
 
+import logging
 logger = logging.getLogger(__name__)
 
 _MEMORY_FRACTION = 15 / 16  # The fraction of total memory Parla should assume it can use.
@@ -35,8 +35,6 @@ class _CPUMemory(Memory):
         return array.asnumpy(target)
 
 
-# from ..environments import EnvironmentComponent  # for inheritance
-# from . import component
 class _CPUDevice(Device):
     def __init__(
         self, architecture: "Architecture", index, *args, n_cores, **kws
@@ -124,18 +122,19 @@ class _CPUWholeArchitecture(_GenericCPUArchitecture):
     def devices(self):
         return [self._device]
 
-    def __call__(self, id, *args, **kwds) -> _CPUDevice:
+    def __call__(self, id=0, *args, **kwds) -> _CPUDevice:
         assert id == 0, "Whole CPU architecture only supports a single CPU device."
         return _CPUDevice(self, id, *args, **kwds, n_cores=None)
 
 
-if os.environ.get("PARLA_CPU_ARCHITECTURE", "").lower() == "cores":
-    cpu = _CPUCoresArchitecture("CPU Cores", "cpu")
-else:
-    if os.environ.get("PARLA_CPU_ARCHITECTURE",
-                      "").lower() not in ("whole", ""):
-        logger.warning("PARLA_CPU_ARCHITECTURE only supports cores or whole.")
-    cpu = _CPUWholeArchitecture("Whole CPU", "cpu")
+ENV_CPU_ARCH = os.environ.get("CROSSPY_CPU_ARCHITECTURE",
+                  "whole").lower()
+if ENV_CPU_ARCH not in ("whole", "cores"):
+    logger.warning("CROSSPY_CPU_ARCHITECTURE only supports cores or whole.")
+
+cpu = _CPUCoresArchitecture(
+    "CPU Cores", "cpu"
+) if ENV_CPU_ARCH == "cores" else _CPUWholeArchitecture("Whole CPU", "cpu")
 cpu.__doc__ = """The `~parla.device.Architecture` for CPUs.
 
 >>> cpu()

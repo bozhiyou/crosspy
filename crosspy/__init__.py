@@ -9,6 +9,9 @@ Provides
 import warnings
 warnings.simplefilter("default")
 
+from typing import Iterable, Optional
+from types import ModuleType
+
 import numpy
 try:
     import cupy
@@ -24,18 +27,17 @@ except (ImportError, AttributeError) as e:
         warnings.warn(ImportWarning(traceback.format_exc() + "\nFailed to import CuPy due to the error above. GPU functionalities not available."))
     cupy = None
 
-from typing import Iterable, Optional
-from types import ModuleType
 
 from .device.cpu import cpu
 if cupy:
     from .device.gpu import gpu
+    from .utils.cupy import _pin_memory, _pinned_memory_empty, _pinned_memory_empty_like
 
 from .core import CrossPyArray
 
-from .ldevice import PartitionScheme, partition
+from .partition import PartitionScheme, partition
 
-from .mpi import alltoallv, all2ints, assignment
+from .transfer import alltoallv, all2ints, alltoall, assignment
 
 from . import utils
 
@@ -110,7 +112,7 @@ def array(
     if distribution is not None:
         obj = partition(obj, distribution=distribution, wrapper=wrapper)
 
-    from .array import is_array
+    from .utils.array import is_array
     def inner(obj, axis):
         if is_array(obj):  # numpy, cupy, crosspy
             if wrapper:

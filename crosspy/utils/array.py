@@ -1,18 +1,48 @@
-import logging
+import builtins
 from abc import ABCMeta, abstractmethod
 from typing import Dict
 
-# FIXME: This load of numpy causes problems if numpy is multiloaded. So this breaks using VECs with parla tasks.
-#  Loading numpy locally works for some things, but not for the array._register_array_type call.
-import numpy as np
-
-from .device import device
-
+import logging
 logger = logging.getLogger(__name__)
+
+import numpy, numpy as np
+
+from crosspy.device import device
+from crosspy.utils import get_module
 
 __all__ = [
     "get_array_module", "get_memory", "is_array", "asnumpy", "storage_size"
 ]
+
+_array_types: Dict[type, 'ArrayType'] = dict()
+
+def get_array_module(a):
+    """
+    :param a: A numpy-compatible array.
+    :return: The numpy-compatible module associated with the array class (e.g., cupy or numpy).
+    """
+    mod = get_module(a)
+    if mod is builtins:
+        return numpy
+    return mod or _array_types[type(a)].get_array_module(a)
+
+
+def is_array(a) -> bool:
+    """
+    :param a: A value.
+    :return: True if `a` is an array of some type known to parla.
+    """
+    return type(a) in _array_types
+
+
+def asnumpy(a):
+    try:
+        ar = get_array_module(a)
+        if hasattr(ar, "asnumpy"):
+            return getattr(ar, "asnumpy")(a)
+    except KeyError:
+        pass  # numpy.int64
+    return np.asarray(a)
 
 
 class ArrayType(metaclass=ABCMeta):
@@ -48,10 +78,6 @@ class ArrayType(metaclass=ABCMeta):
         """
         pass
 
-
-_array_types: Dict[type, ArrayType] = dict()
-
-
 def register_array_type(ty):
     def register(get_memory_impl: ArrayType):
         _array_types[ty] = get_memory_impl
@@ -66,32 +92,6 @@ def can_assign_from(a, b):
     :return: True iff `a` supports assignments from `b`.
     """
     return _array_types[type(a)].can_assign_from(a, b)
-
-
-def get_array_module(a):
-    """
-    :param a: A numpy-compatible array.
-    :return: The numpy-compatible module associated with the array class (e.g., cupy or numpy).
-    """
-    return _array_types[type(a)].get_array_module(a)
-
-
-def is_array(a) -> bool:
-    """
-    :param a: A value.
-    :return: True if `a` is an array of some type known to parla.
-    """
-    return type(a) in _array_types
-
-
-def asnumpy(a):
-    try:
-        ar = get_array_module(a)
-        if hasattr(ar, "asnumpy"):
-            return getattr(ar, "asnumpy")(a)
-    except KeyError:
-        pass  # numpy.int64
-    return np.asarray(a)
 
 
 def get_memory(a) -> "device.Memory":

@@ -2,11 +2,19 @@
 #  Loading numpy locally works for some things, but not for the array._register_array_type call.
 import numpy
 
-from ...array import ArrayType, register_array_type
-from ..device import register_architecture
-from .generic import cpu, _CPUMemory
+from crosspy import device
+from crosspy.utils.array import ArrayType, register_array_type
+from .generic import cpu, _CPUDevice, _CPUMemory
 
 __all__ = ["cpu"]
+
+
+device.register_architecture("cpu")(cpu)
+
+@device.of(numpy.ndarray)
+def default_numpy_device(np_arr):
+    assert(isinstance(np_arr, (numpy.ndarray)))
+    return cpu(0)
 
 
 class _NumPyArrayType(ArrayType):
@@ -20,6 +28,4 @@ class _NumPyArrayType(ArrayType):
     def get_array_module(self, a):
         return numpy
 
-
-register_architecture("cpu")(cpu)
 register_array_type(numpy.ndarray)(_NumPyArrayType())

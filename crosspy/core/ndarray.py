@@ -6,7 +6,9 @@ from numbers import Number
 from collections import defaultdict
 from contextlib import nullcontext
 from ..device import Device, cpu
-from ..array import ArrayType, register_array_type, get_array_module, is_array
+from ..utils.array import ArrayType, register_array_type, get_array_module, is_array
+
+from .x1darray import X1D
 
 __all__ = ['CrossPyArray', 'BasicIndexType', 'IndexType']
 
@@ -150,6 +152,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                 self._concat_axis = axis if axis is None else _check_concat_axis(shapes, axis)
                 if self._concat_axis is not None:
                     assert self._concat_axis == 0, NotImplementedError("axis > 0 not implemented")
+                    ... # x1d
                     self._bounds = numpy.cumsum(shapes, dtype=numpy.uint64)
 
                 self._shape = getattr(self._original_data, 'shape', self._init_shape(shapes))
@@ -355,25 +358,20 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
 
         Return shape and device is same to input indices unless out is given
         """
-        if isinstance(i, (int, numpy.integer, numpy.ndarray)):
-            if isinstance(i, numpy.ndarray):
-                i = numpy.expand_dims(i, axis=-1)
-            d_bounds = self.boundaries
-            lib = numpy
-        elif cupy and isinstance(i, cupy.ndarray):
-            i = cupy.expand_dims(i, axis=-1)
+        lib = get_array_module(i)
+        assert hasattr(lib, 'searchsorted'), TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(i))
+        d_bounds = self.boundaries
+        if cupy and isinstance(i, cupy.ndarray):
             with cupy.cuda.Stream(non_blocking=True) as s:
                 # TODO pin boundaries once
                 d_bounds = cupy.empty_like(self.boundaries)
                 d_bounds.set(self.boundaries)
                 s.synchronize()
-            lib = cupy
-        else:
-            raise TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(i))
+        blk_ids = lib.searchsorted(d_bounds, i, side='right')
         if out is not None:
-            lib.sum(i >= d_bounds, axis=-1, keepdims=False, out=out)
+            out[...] = blk_ids
             return
-        return lib.sum(i >= d_bounds, axis=-1, keepdims=False)
+        return blk_ids
 
     def _indexing_check(self, index: IndexType):
         """Check before set and get item"""
@@ -687,7 +685,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
             except AttributeError as e:
                 e_obj = e
             try:
-                from crosspy.array import get_array_module
+                from crosspy.utils.array import get_array_module
                 libfunc = getattr(get_array_module(obj), name)
                 return lambda *a, **kw: libfunc(obj, *a, **kw)
             except AttributeError as e_lib:
@@ -778,7 +776,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
             return self.all_to(placement)
 
     def _to_multidevice(self, placement):
-        from ..ldevice import LDeviceSequenceBlocked
+        from ..partition.ldevice import LDeviceSequenceBlocked
         Partitioner = LDeviceSequenceBlocked
         mapper = Partitioner(len(placement), placement=placement)
         arr_p = mapper.partition_tensor(self)

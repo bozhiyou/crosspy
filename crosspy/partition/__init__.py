@@ -1,0 +1,1 @@
+from .ldevice import PartitionScheme, partition

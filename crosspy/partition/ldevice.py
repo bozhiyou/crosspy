@@ -23,8 +23,8 @@ from math import floor, ceil
 from typing import Iterable, List, Optional, Tuple, Collection, Mapping, Union, Any
 from warnings import warn
 
-from .core.ndarray import IndexType
-from .device import Device, Memory, MemoryKind
+from ..core.ndarray import IndexType
+from ..device import Device, Memory, MemoryKind
 from .placement import PlacementSource, get_placement_for_any
 
 

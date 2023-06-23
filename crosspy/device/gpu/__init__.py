@@ -1,19 +1,18 @@
-from .. import device
-from .cuda import gpu
-from ...array import ArrayType, register_array_type
+from crosspy import device
+from .cuda import gpu, _GPUDevice
+from crosspy.utils.array import ArrayType, register_array_type
 
 try:
     import cupy
     import cupy.cuda
-except (ImportError, AttributeError):
+except (ImportError, AttributeError) as e:
     import inspect
     # Ignore the exception if the stack includes the doc generator
     if all(
         "sphinx" not in f.filename
         for f in inspect.getouterframes(inspect.currentframe())
     ):
-        raise
-    cupy = None
+        raise e
 
 __all__ = ['gpu', 'cupy']
 
@@ -32,5 +31,4 @@ class _CuPyArrayType(ArrayType):
     def get_array_module(self, a):
         return cupy.get_array_module(a)
 
-if cupy:
-    register_array_type(cupy.ndarray)(_CuPyArrayType())
+register_array_type(cupy.ndarray)(_CuPyArrayType())

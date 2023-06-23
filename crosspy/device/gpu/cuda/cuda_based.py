@@ -1,23 +1,38 @@
+"""
+pip install cuda-python
+"""
 from contextlib import contextmanager
-
-import logging
 from functools import wraps, lru_cache
+from math import log2
 from typing import Dict, List
 
-from crosspy.device.device import Architecture
+import logging
+logger = logging.getLogger(__name__)
 
-from ..device import MemoryKind, Memory, Architecture, Device
+from crosspy.device.device import Architecture
+from crosspy.device.device import MemoryKind, Memory, Architecture, Device
 
 import numpy
 
-logger = logging.getLogger(__name__)
+from cuda import cuda, nvrtc
+cuda.cuInit(0)
 
-import cupy
-import cupy.cuda
+def ASSERT_DRV(err):
+    if isinstance(err, cuda.CUresult):
+        if err != cuda.CUresult.CUDA_SUCCESS:
+            raise RuntimeError("Cuda Error: {}".format(err))
+    elif isinstance(err, nvrtc.nvrtcResult):
+        if err != nvrtc.nvrtcResult.NVRTC_SUCCESS:
+            raise RuntimeError("Nvrtc Error: {}".format(err))
+    else:
+        raise RuntimeError("Unknown error type: {}".format(err))
+    
+def ERRCHK(res):
+    err, *res = res
+    ASSERT_DRV(err)
+    return res if len(res) > 1 else res[0]
 
-from math import log2
-
-__all__ = ["gpu", "cupy"]
+__all__ = ["gpu", "cuda"]
 
 
 class _DeviceCUPy:
@@ -65,7 +80,7 @@ class _GPUMemory(Memory):
         # FIXME This code breaks the semantics since a different device
         #       could copy data on the current device to a remote device.
         #with self.device._device_context():
-        with cupy.cuda.Device(self.device.index):
+        with cuda.CUDeviceGet(self.device.index):
             if isinstance(target, numpy.ndarray):
                 logger.debug("Moving data: CPU => %r", cupy.cuda.Device())
                 return cupy.asarray(target)
@@ -141,11 +156,8 @@ class _GPUArchitecture(Architecture):
     def __init__(self, name, id):
         super().__init__(name, id)
         devices = []
-        if not cupy:
-            self._devices = []
-            return
-        for device_id in range(2**16):
-            cupy_device = cupy.cuda.Device(device_id)
+        for device_id in range(ERRCHK(cuda.cuDeviceGetCount())):
+            cupy_device = ERRCHK(cuda.cuDeviceGet(device_id))
             try:
                 cupy_device.compute_capability
             except cupy.cuda.runtime.CUDARuntimeError:
@@ -162,7 +174,7 @@ class _GPUArchitecture(Architecture):
         return _GPUDevice(self, index, *args, **kwds)
 
 
-gpu = _GPUArchitecture("GPU", "gpu")
+gpu = _GPUArchitecture("GPU", "cuda")
 gpu.__doc__ = """The `~parla.device.Architecture` for CUDA GPUs.
 
 >>> gpu(0)

@@ -1,7 +1,7 @@
 from typing import List, Iterable, Collection, Any, Union, FrozenSet
 
-from .device import Device, Architecture, get_all_devices
-from .array import is_array, get_memory
+from ..device import Device, Architecture, get_all_devices
+from crosspy.utils.array import is_array, get_memory
 
 # TODO (bozhi): We may need a centralized typing module to reduce types being imported everywhere.
 PlacementSource = Union[Architecture, Device, Any]
