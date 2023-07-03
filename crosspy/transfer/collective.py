@@ -1,8 +1,8 @@
+import asyncio
+import functools
 import itertools
-from collections import defaultdict
 from contextlib import nullcontext
 from functools import lru_cache
-from typing import Any
 
 import numpy
 from crosspy import cupy, _pin_memory, _pinned_memory_empty_like
@@ -12,6 +12,206 @@ from crosspy.utils.array import get_array_module
 
 from .cache import same_place, any_to_cuda, pull, pull_to
 
+# compute masks and local indices
+def get_blkid(i, local_block_offset, out=None):
+    if out is not None:
+        cupy._sorting.search._searchsorted_kernel(i, local_block_offset, local_block_offset.size, True, True, out)
+        return
+    return cupy.searchsorted(local_block_offset, i, side='right')
+
+class DeviceProxy:
+    def __init__(self, id, device, *, stream_pool=None):
+        self.__id = id
+        self.__device = device
+        self._stream_pool = stream_pool or []
+
+    @property
+    def id(self): return self.__id
+    @property
+    def device(self): return self.__device
+
+    def here(func: ...):  # type: ignore
+        """(decorator) execute under current device"""
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            with self.device:
+                if "stream" in kwargs and kwargs['stream'] is not None:
+                    with kwargs['stream']:
+                        return func(self, *args, **kwargs)
+                else:
+                    return func(self, *args, **kwargs)
+        return wrapper
+
+    async def setup(self, metadata, indices, debug=None):
+        device, stream_pool = self.device, self._stream_pool
+        # make replicas
+        # TODO: indices may not cover all devices hence no need to replicate for all
+        # replicate indices
+        with device:
+            with cupy.cuda.Stream(non_blocking=True) as s:
+                stream_pool.append(s)
+                indices_ = cupy.empty((2, *indices.shape), dtype=indices.dtype)  # 0 for indices, 1 for blkid
+                indices_[0].set(indices, stream=s)
+        await asyncio.sleep(0)
+        # replicate metadata
+        with device:
+            replicas = []
+            for array in metadata:
+                with cupy.cuda.Stream(non_blocking=True) as s:
+                    stream_pool.append(s)
+                    replicas.append(cupy.empty(array.shape, dtype=array.dtype))
+                    replicas[-1].set(array, stream=s)
+        block_offset_, device_idx_, device_offset_ = replicas
+        del replicas
+        await asyncio.sleep(0)
+        ########
+        # compute blk id
+        ########
+        with device:
+            with stream_pool[0] as s:  # indices
+                stream_pool[1].synchronize()  # block_offset
+                # stream sync state [x s x x]
+                get_blkid(indices_[0], block_offset_, out=indices_[1])
+                del block_offset_
+        await asyncio.sleep(0)
+        ########
+        # get device id and compute mask
+        ########
+        with device:
+            with stream_pool[0] as s:  # indices -> [indices, blkid]
+                stream_pool[2].synchronize()  # device_idx
+                # stream sync state [x s s x]
+                device_idx_ = device_idx_[indices_[1]]
+        await asyncio.sleep(0)
+        with device:
+            with stream_pool[0] as s:  # indices -> [indices, blkid] -> device_idx
+                mask_ = (device_idx_ == self.id)
+                del device_idx_
+        await asyncio.sleep(0)
+        self._handles = mask_, indices_, device_offset_
+
+    def free(self):
+        del self._handles
+
+    async def pair(self, other_mask, debug=None):
+        my_mask, indices, device_offset = self._handles
+        device = self.device
+        with device:
+            with cupy.cuda.Stream(non_blocking=True) as stream:
+                mask = cupy.empty(other_mask.shape, dtype=cupy.bool_)
+                mask.data.copy_from_device_async(other_mask.data, other_mask.nbytes, stream=stream)
+        await asyncio.sleep(0)
+        with device:
+            with stream:
+                self._stream_pool[0].synchronize()
+                mask = mask & my_mask
+        await asyncio.sleep(0)
+        ########
+        # mask indices and block id
+        ########
+        with device:
+            with stream:
+                # NOTE several equivalences:
+                #   indices_ = indices_[:, mask]  # slow, 1 copy bool + 2 scan
+                #   indices_ = cupy.compress(mask, indices_, axis=1)  # compress by bool = nonzero + take
+                #   maskidx = mask.nonzero().squeeze(axis=-1)  # argwhere implements nonzero/where TODO: inplace hack cupy/_core/_routines_indexing.pyx:_ndarray_argwhere
+                idx = cupy.argwhere(mask).squeeze(axis=-1)
+        await asyncio.sleep(0)
+        with device:
+            with stream:
+                indices = indices[:, idx]
+        ########
+        # gather offset and convert indices
+        ########
+        with device:
+            with stream:
+                self._stream_pool[3].synchronize()  # device_offset
+                # stream sync state [x s s s]
+                # NOTE use take to avoid memcpy in indices_[1] = device_offset_[indices_[1]]
+                device_offset.take(indices[1], out=indices[1])
+                del device_offset  # device_offset
+        await asyncio.sleep(0)
+        with device:
+            with stream:
+                # convert indices to local
+                cupy.subtract(indices[0], indices[1], out=idx)  # mem reuse
+        return stream, idx
+
+class Channel:
+    def __init__(self, src: DeviceProxy, dst: DeviceProxy):
+        self.src = src
+        self.dst = dst
+
+    async def setup(self):
+        (self.src_stream, self.srcidx), (self.dst_stream, self.dstidx) = await asyncio.gather(
+            self.src.pair(self.dst._handles[0]),
+            self.dst.pair(self.src._handles[0]),
+        )
+
+    async def launch(self, source, target):
+        sdid, ddid = self.src.id, self.dst.id
+        src = source.device_array[sdid]
+        dst = target.device_array[ddid]
+        with self.src.device as sdevice:
+            with self.src_stream as sstrm:
+                buf = src[self.srcidx]
+        await asyncio.sleep(0)
+        with self.dst.device as ddevice:
+            with self.dst_stream as dstrm:
+                sstrm.synchronize()
+                dst[self.dstidx].data.copy_from_device_async(buf.data, buf.nbytes, stream=sstrm)
+        await asyncio.sleep(0)
+        with self.dst.device as ddevice:
+            with self.dst_stream as dstrm:
+                dstrm.synchronize()
+
+class alltoall:
+    def __init__(self, target, dst_indices, source, src_indices, debug=None):
+        # assert dst_indices.dtype.kind == src_indices.dtype.kind == 'u', \
+        #     "Only support indices of unsigned dtype (got %s/%s)" % (dst_indices.dtype, src_indices.dtype)
+        self.source = source
+        self.target = target
+        asyncio.run(self.init_async(target, dst_indices, source, src_indices, debug))
+
+    async def init_async(self, target, target_indices, source, source_indices, debug=None):
+        if isinstance(target_indices, numpy.ndarray):
+            target_indices = _pin_memory(target_indices)
+        if isinstance(source_indices, numpy.ndarray):
+            source_indices = _pin_memory(source_indices)
+
+        # set up proxies
+        src_proxies = [DeviceProxy(did, get_device(darray)) for did, darray in source.device_array.items()]
+        dst_proxies = [DeviceProxy(did, get_device(darray)) for did, darray in target.device_array.items()]
+        # set up channels
+        self.emit_order = list(itertools.product(src_proxies, dst_proxies))
+        self.emit_order = [self.emit_order[i % len(self.emit_order)] for i in range(0, len(self.emit_order) * (len(dst_proxies) + 1), len(dst_proxies) + 1)]
+        self.channels = [Channel(src, dst) for src, dst in self.emit_order]
+
+        async def _endpoint_setup(proxies, metadata, indices, debug=None):
+            await asyncio.gather(*(
+                dp.setup(metadata, indices, debug)
+                for dp in proxies
+            ))
+
+        await asyncio.gather(
+                _endpoint_setup(src_proxies, source.get_metadata(), source_indices, 'src'),
+                _endpoint_setup(dst_proxies, target.get_metadata(), target_indices, 'dst')
+            )
+
+        await asyncio.gather(*(
+            edge.setup() for edge in self.channels
+        ))
+
+        for n in (*src_proxies, *dst_proxies):
+            n.free()
+    
+    def __call__(self):
+        asyncio.run(self.run_async())
+
+    async def run_async(self):
+        await asyncio.gather(*(
+            channel.launch(self.source, self.target) for channel in self.channels
+        ))
 
 def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     """
@@ -116,7 +316,6 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     for s in streams:
         s.synchronize()
 
-
 def all2ints(src, dest, dest_index, debug=False):
     """
     sendbuf [[] [] []]
@@ -145,189 +344,6 @@ def all2ints(src, dest, dest_index, debug=False):
                 assert not debug or cupy.allclose(dest._original_data[j][scatter_indices_local], cupy.asarray(buf))
                 dest._original_data[j][scatter_indices_local] = cupy.asarray(buf)
             # scatter
-
-
-class alltoall:
-    def __init__(self, target, target_indices, source, source_indices, debug=False):
-        # Stage 1: indices distribution
-        if isinstance(target_indices, numpy.ndarray):
-            target_indices = _pin_memory(target_indices)
-        if isinstance(source_indices, numpy.ndarray):
-            source_indices = _pin_memory(source_indices)
-
-        # make replicas
-        # TODO: indices may not cover all devices hence no need to replicate for all
-        src_stream_pool = defaultdict(list)
-        dst_stream_pool = defaultdict(list)
-
-        def _make_handles(xpa, indices, stream_pool):
-            """create handles for data on devices"""
-            handles = {}
-            for did, darray in xpa.device_array.items():
-                replicas = []
-                with get_device(darray) as device:
-                    for array in (indices, *xpa.get_metadata()):
-                        with cupy.cuda.Stream(non_blocking=True) as s:
-                            stream_pool[did].append(s)
-                            replicas.append(cupy.empty(array.shape, dtype=array.dtype))
-                            replicas[-1].set(array, stream=s)
-                handles[did] = replicas
-            return handles
-        src_handles = _make_handles(source, source_indices, src_stream_pool)
-        dst_handles = _make_handles(target, target_indices, dst_stream_pool)
-
-        # compute masks and local indices
-        def get_blkid(i, local_block_offset):
-            return cupy.searchsorted(local_block_offset, i, side='right')
-        
-        def _compute_blkid(handles, stream_pool):
-            for did, dhandles in handles.items():
-                assert len(dhandles) == 4
-                indices_, block_offset_, *_ = dhandles
-                with get_device(indices_) as device:
-                    with stream_pool[did][1] as s:  # block_offset
-                        stream_pool[did][0].synchronize()  # indices
-                        block_idx = get_blkid(indices_, block_offset_)
-                        dhandles[1] = block_idx
-        _compute_blkid(src_handles, src_stream_pool)
-        _compute_blkid(dst_handles, dst_stream_pool)
-
-        def _compute_mask(handles, stream_pool):
-            for did, dhandles in handles.items():
-                assert len(dhandles) == 4
-                _, block_idx_, device_idx_, _ = dhandles
-                with get_device(device_idx_) as device:
-                    with stream_pool[did][2] as s:   # device_idx
-                        stream_pool[did][1].synchronize()  # block_offset -> blkid
-                        device_idx_ = device_idx_[block_idx_]
-                        dhandles[2] = (device_idx_ == did)
-        _compute_mask(src_handles, src_stream_pool)
-        _compute_mask(dst_handles, dst_stream_pool)
-
-        def _mask_blkid(handles, stream_pool):
-            for did, dhandles in handles.items():
-                assert len(dhandles) == 4
-                _, block_idx_, mask_, _ = dhandles
-                with get_device(block_idx_) as device:
-                    with stream_pool[did][1] as s:   # blkid
-                        stream_pool[did][2].synchronize()  # device_idx -> mask
-                        dhandles[1] = block_idx_[mask_]
-
-        _mask_blkid(src_handles, src_stream_pool)
-        _mask_blkid(dst_handles, dst_stream_pool)
-
-        def _mask_indices(handles, stream_pool):
-            for did, dhandles in handles.items():
-                assert len(dhandles) == 4
-                indices_, _, mask_, _ = dhandles
-                with get_device(indices_) as device:
-                    with stream_pool[did][0] as s:   # indices
-                        stream_pool[did][2].synchronize()  # device_idx -> mask
-                        dhandles[0] = indices_[mask_]
-
-        _mask_indices(src_handles, src_stream_pool)
-        _mask_indices(dst_handles, dst_stream_pool)
-
-        def _compute_offset(handles, stream_pool):
-            for did, dhandles in handles.items():
-                assert len(dhandles) == 4
-                _, block_idx_, _, device_offset_ = dhandles
-                with get_device(device_offset_) as device:
-                    with stream_pool[did][3] as s:   # device_offset
-                        stream_pool[did][1].synchronize()  # blkid
-                        dhandles[3] = device_offset_[block_idx_]
-                        del dhandles[1]  # blkid
-
-        _compute_offset(src_handles, src_stream_pool)
-        _compute_offset(dst_handles, dst_stream_pool)
-
-        def _convert_indices(handles, stream_pool):
-            for did, dhandles in handles.items():
-                assert len(dhandles) == 3
-                indices_, _, device_offset_ = dhandles
-                with get_device(indices_) as device:
-                    with stream_pool[did][0] as s:   # indices
-                        stream_pool[did][3].synchronize()  # dev_offset
-                        # convert indices to local
-                        dtype_ = dhandles[0].dtype
-                        dhandles[0] = (dhandles[0] - device_offset_).astype(dtype_)
-                        del dhandles[2]  # device_offset
-        
-        _convert_indices(src_handles, src_stream_pool)
-        _convert_indices(dst_handles, dst_stream_pool)
-
-        # build channels
-        self.channels = {}
-        for sdid, ddid in itertools.product(src_handles, dst_handles):
-            with get_device(src_handles[sdid][0]) as device:
-                with cupy.cuda.Stream(non_blocking=True) as sstream:
-                    dmask_s = cupy.empty(target_indices.shape, dtype=cupy.bool_)
-            with get_device(dst_handles[ddid][0]) as device:
-                with cupy.cuda.Stream(non_blocking=True) as dstream:
-                    smask_d = cupy.empty(source_indices.shape, dtype=cupy.bool_)
-            self.channels[sdid, ddid] = [sstream, dstream, dmask_s, smask_d]
-        self.emit_order = list(self.channels.keys())
-        self.emit_order = [self.emit_order[i % len(self.channels)] for i in range(0, len(self.channels) * (len(dst_handles) + 1), len(dst_handles) + 1) ]
-
-        # exchange mask
-        for sdid, ddid in self.emit_order:
-            channel = self.channels[sdid, ddid]
-            sstrm, dstrm, dmask_s, smask_d = channel
-            smask = src_handles[sdid][1]
-            dmask = dst_handles[ddid][1]
-            with get_device(smask) as device:
-                with sstrm as s:
-                    dst_stream_pool[ddid][2].synchronize()
-                    dmask_s.data.copy_from_device_async(dmask.data, dmask.nbytes, stream=dstrm)
-            with get_device(dmask) as device:
-                with dstrm as s:
-                    src_stream_pool[sdid][2].synchronize()
-                    smask_d.data.copy_from_device_async(smask.data, smask.nbytes, stream=sstrm)
-
-        # reduce mask
-        for sdid, ddid in self.emit_order:
-            channel = self.channels[sdid, ddid]
-            sstrm, dstrm, dmask_s, smask_d = channel
-            _, smask = src_handles[sdid]
-            _, dmask = dst_handles[ddid]
-            with get_device(smask) as device:
-                with sstrm as s:
-                    channel[2] = dmask_s[smask]
-            with get_device(dmask) as device:
-                with dstrm as s:
-                    channel[3] = smask_d[dmask]
-
-        # reduce indices
-        for sdid, ddid in self.emit_order:
-            channel = self.channels[sdid, ddid]
-            sstrm, dstrm, smask, dmask = channel
-            sindices, _ = src_handles[sdid]
-            dindices, _ = dst_handles[ddid]
-            with get_device(smask) as device:
-                with sstrm as s:
-                    src_stream_pool[sdid][0].synchronize()
-                    channel[2] = sindices[smask]
-            with get_device(dmask) as device:
-                with dstrm as s:
-                    dst_stream_pool[ddid][0].synchronize()
-                    channel[3] = dindices[dmask]
-
-        self.source = source
-        self.target = target
-        return
-
-    def __call__(self):
-        for sdid, ddid in self.emit_order:
-            sstrm, dstrm, sindices, dindices = self.channels[sdid, ddid]
-            with get_device(sindices) as device:
-                with sstrm:
-                    buf = self.source.device_array[sdid][sindices]
-            with get_device(dindices) as device:
-                with dstrm:
-                    sstrm.synchronize()
-                    self.target.device_array[ddid][dindices].data.copy_from_device_async(buf.data, buf.nbytes, stream=sstrm)
-                    dstrm.synchronize()
-                    
 
 def assignment(left, left_indices, right, right_indices):
     if left_indices is None:

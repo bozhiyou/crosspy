@@ -23,11 +23,11 @@ class Vocabulary(list):
 class _Metadata:
     def __init__(self, nblocks, *, alloc=numpy.empty):
         # (len(blk0), len(blk1), ...)
-        self.block_offset = alloc(nblocks, dtype=numpy.uint64)
+        self.block_offset = alloc(nblocks, dtype=numpy.int64)
         # device id for each block
-        self.device_idx = alloc(nblocks, dtype=numpy.uint64)
+        self.device_idx = alloc(nblocks, dtype=numpy.int64)
         # device-local = global index - device offset
-        self.device_offset = alloc(nblocks, dtype=numpy.uint64)
+        self.device_offset = alloc(nblocks, dtype=numpy.int64)
         """
         dev_id, dev_offset = device_idx[blk_id], device_offset[blk_id]
         if blk_id:

@@ -26,6 +26,12 @@ except (ImportError, AttributeError) as e:
         import traceback
         warnings.warn(ImportWarning(traceback.format_exc() + "\nFailed to import CuPy due to the error above. GPU functionalities not available."))
     cupy = None
+# else:
+#     if cupy.cuda.runtime.driverGetVersion() >= 11020:
+#         try:  # use asynchronous stream ordered memory
+#             cupy.cuda.set_allocator(cupy.cuda.MemoryAsyncPool().malloc)
+#         except RuntimeError:
+#             pass
 
 
 from .device.cpu import cpu

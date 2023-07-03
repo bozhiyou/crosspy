@@ -30,7 +30,7 @@ _architectures_list: List[Architecture] = []
 
 def of(*types):
     """
-    (decorator)
+    (decorator) device getter for array type
 
     >>> @device.of(numpy.ndarray)
         def get_device(np_arr):
