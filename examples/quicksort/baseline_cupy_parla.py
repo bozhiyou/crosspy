@@ -1,5 +1,4 @@
 # from parla import Parla, spawn, TaskSpace
-import argparse
 import cupy as cp
 import numpy as np
 import time
@@ -9,12 +8,6 @@ from parla.cython.tasks import AtomicTaskSpace as TaskSpace
 from parla.cython.device_manager import gpu
 from parla.common.globals import get_current_context
 from parla.common.array import copy
-
-parser = argparse.ArgumentParser()
-parser.add_argument("-dev_config", type=str, default="devices_sample.YAML")
-parser.add_argument("-num_gpus", type=int, default=2)
-parser.add_argument("-m", type=int, default=10000)
-args = parser.parse_args()
 
 
 #Note: this experimental allocator breaks memcpy async
@@ -31,13 +24,14 @@ def partition_kernel(A, B, comp, pivot):
     bufferA = A
     bufferB = B
     comp[:] = bufferA[:] < pivot
-    mid = (int)(comp.sum())
+    mid = int(comp.sum())
     bufferB[:mid] = bufferA[comp]
     bufferB[mid:] = bufferA[~comp]
     return mid
 
 
 def partition(A, B, pivot):
+    """Partition A against pivot and output to B, return mid index."""
     context = get_current_context()
     n_partitions = len(A)
     mid = np.zeros(n_partitions, dtype=np.uint32)
@@ -74,21 +68,19 @@ def balance_partition(A, left_counts):
         local_source_start = 0
         message_size = remaining_left[source_idx]
         while message_size > 0:
-            max_message = min(free[target_idx], message_size)
-
-            if max_message == 0:
+            if free[target_idx] == 0:
                 target_idx += 1
                 local_target_start = 0
                 continue
+            used = min(free[target_idx], message_size)
+            free[target_idx] -= used
+            remaining_left[source_idx] -= used
 
-            free[target_idx] -= max_message
-            remaining_left[source_idx] -= max_message
-
-            sz_left[source_idx, target_idx] = max_message
+            sz_left[source_idx, target_idx] = used
             source_start_left[source_idx, target_idx] = local_source_start
             target_start_left[source_idx, target_idx] = local_target_start
-            local_source_start += max_message
-            local_target_start += max_message
+            local_source_start += used
+            local_target_start += used
 
             message_size = remaining_left[source_idx]
 
@@ -97,28 +89,30 @@ def balance_partition(A, left_counts):
         local_source_start = left_counts[source_idx]
         message_size = remaining_right[source_idx]
         while message_size > 0:
-            max_message = min(free[target_idx], message_size)
-
-            if max_message == 0:
+            if free[target_idx] == 0:
                 target_idx += 1
                 local_target_start = 0
                 continue
+            used = min(free[target_idx], message_size)
+            free[target_idx] -= used
+            remaining_right[source_idx] -= used
 
-            free[target_idx] -= max_message
-            remaining_right[source_idx] -= max_message
-
-            sz_right[source_idx, target_idx] = max_message
+            sz_right[source_idx, target_idx] = used
             source_start_right[source_idx, target_idx] = local_source_start
             target_start_right[source_idx, target_idx] = local_target_start
-            local_source_start += max_message
-            local_target_start += max_message
+            local_source_start += used
+            local_target_start += used
 
             message_size = remaining_right[source_idx]
 
-    return (source_start_left, target_start_left, sz_left), (
+    return (
+        source_start_left,
+        target_start_left,
+        sz_left
+    ), (
         source_start_right,
         target_start_right,
-        sz_right,
+        sz_right
     )
 
 
@@ -143,7 +137,7 @@ def scatter(A, B, left_info, right_info):
                 source = B[source_idx]
 
                 copy(
-                    target[target_start:target_end], 
+                    target[target_start:target_end],
                     source[source_start:source_end]
                     )
 
@@ -165,137 +159,100 @@ def scatter(A, B, left_info, right_info):
                 source = B[source_idx]
 
                 copy(
-                    target[target_start:target_end], 
+                    target[target_start:target_end],
                     source[source_start:source_end]
                     )
 
-                
 
 
-def quicksort(idx, global_prefix, global_A, global_workspace, start, end, T):
-    
-    start = int(start)
-    end = int(end)
 
-    # # How to select the active block from the global array
-    global_start_idx = np.searchsorted(global_prefix, start, side="right") - 1
-    global_end_idx = np.searchsorted(global_prefix, end, side="right") - 1
-
-    # Split within a block at the endpoints (to form slices)
-    local_left_split = start - global_prefix[global_start_idx]
-    local_right_split = end - global_prefix[global_end_idx]
-
-    local_left_split = (int)(local_left_split)
-    local_right_split = (int)(local_right_split)
-
-    A = []
-    workspace = []
-    
-    #Reform a global array out of sliced components (NOTE: THESE SEMANTICS BREAK PARRAY. Concurrent slices cannot be written)
-    if global_start_idx == global_end_idx and local_left_split < local_right_split:
-        A.append(global_A[global_start_idx][local_left_split:local_right_split])
-        workspace.append(global_workspace[global_start_idx])
-    else:
-        if (global_start_idx < global_end_idx) and (
-            local_left_split < len(global_A[global_start_idx])
-        ):
-            A.append(global_A[global_start_idx][local_left_split:])
-            workspace.append(global_workspace[global_start_idx][local_left_split:])
-
-        for i in range(global_start_idx + 1, global_end_idx):
-            A.append(global_A[i])
-            workspace.append(global_workspace[i])
-
-        if (global_end_idx < len(global_A)) and local_right_split > 0:
-            A.append(global_A[global_end_idx][:local_right_split])
-            workspace.append(global_workspace[global_end_idx][:local_right_split])
-
-
-    n_partitions = len(A)
+def quicksort(A, workspace, tid, T):
     device_list = tuple([gpu(arr.device.id) for arr in A])
 
-    @spawn(T[idx], placement=[device_list], vcus=1)
+    @spawn(T[tid], placement=[device_list], vcus=1)
     def quicksort_task():
-        nonlocal global_prefix
-        nonlocal global_A
-        nonlocal global_workspace
-        nonlocal start
-        nonlocal end
+        nonlocal A
+        nonlocal workspace
         nonlocal T
+        # print("TASK", T[tid], get_current_context(), flush=True)
 
         n_partitions = len(A)
 
-        #print("TASK", T[idx], get_current_context(), flush=True)
-
-        if n_partitions == 1:
-            #Base case. The data is on a single gpu.
-            A[0].sort()
+        if n_partitions <= 1:
+            # Base case.
+            if n_partitions == 1:
+                # The data is on a single gpu.
+                A[0].sort()
             return
 
-        if n_partitions == 0:
-            #Base case. The array is empty.
-            return
-
-        #Form local prefix sum
+        # Form local prefix sum
         sizes = np.zeros(len(A) + 1, dtype=np.uint32)
         for i in range(len(A)):
             sizes[i + 1] = len(A[i])
+        size_prefix = np.cumsum(sizes)
+        print("Array", size_prefix[-1], n_partitions, sizes)
 
-        #Choose random pivot
+        # Choose random pivot
         pivot_block = np.random.randint(0, n_partitions)
         pivot_idx = np.random.randint(0, len(A[pivot_block]))
         pivot = (int)(A[pivot_block][pivot_idx])
+        # print("Pivot: ", pivot)
 
-        # Perform local partition and repacking (no communication)
-        left_counts = partition(A, workspace, pivot)
-        local_left_count = np.sum(left_counts)
-        global_left_count = start + local_left_count
+        # Local partition and repacking (no communication)
+        local_mids = partition(A, workspace, pivot)
+        global_left_count = np.sum(local_mids)
 
         # compute communication pattern
-        left_info, right_info = balance_partition(A, left_counts)
+        left_info, right_info = balance_partition(A, local_mids)
 
-        # Send left points to left partition and right points to right partition (communication)
+        # Send local left/right to global left/right (workspace->A communication)
         scatter(A, workspace, left_info, right_info)
 
-        quicksort(
-            2 * idx,
-            global_prefix,
-            global_A,
-            global_workspace,
-            start,
-            global_left_count,
-            T,
-        )
-        quicksort(
-            2 * idx + 1,
-            global_prefix,
-            global_A,
-            global_workspace,
-            global_left_count,
-            end,
-            T,
-        )
+        global_mid_block_idx = np.searchsorted(size_prefix, global_left_count, side="right") - 1
+        global_mid_local_offset = global_left_count - size_prefix[global_mid_block_idx]
 
-def main():
-    # Per device size. 
+        left_partition = []
+        left_partition += [A[i] for i in range(global_mid_block_idx)]
+        if global_mid_block_idx < len(A) and global_mid_local_offset > 0:
+            left_partition += [A[global_mid_block_idx][0:global_mid_local_offset]]
 
-    #This is also treated as the maximum number of points that can be on each device (very strict constraint).
-    #This has a large performance impact due to recursion on the boundaries between partitions.
-    #To do: Separate this into two variables?
+        workspace_left = []
+        workspace_left += [workspace[i] for i in range(global_mid_block_idx)]
+        if global_mid_block_idx < len(A) and global_mid_local_offset > 0:
+            workspace_left += [workspace[global_mid_block_idx][0:global_mid_local_offset]]
 
-    m = args.m
-    global_array = np.arange(m*args.num_gpus, dtype=np.int32)
-    np.random.shuffle(global_array)
+        right_partition = []
+        if global_mid_block_idx < len(A) and global_mid_local_offset < sizes[global_mid_block_idx+1]:
+            right_partition += [A[global_mid_block_idx][global_mid_local_offset:sizes[global_mid_block_idx+1]]]
+        right_partition += [A[i] for i in range(global_mid_block_idx+1, len(A))]
 
-    # Init a distributed crosspy array
+        workspace_right = []
+        if global_mid_block_idx < len(A) and global_mid_local_offset < sizes[global_mid_block_idx+1]:
+            workspace_right += [workspace[global_mid_block_idx]
+                                [global_mid_local_offset:sizes[global_mid_block_idx+1]]]
+        workspace_right += [workspace[i] for i in range(global_mid_block_idx+1, len(A))]
+
+        quicksort(left_partition, workspace, 2 * tid, T)
+        quicksort(right_partition, workspace, 2 * tid + 1, T)
+
+
+def main(args):
+    # This is also treated as the maximum number of points that can be on each device (very strict constraint).
+    # This has a large performance impact due to recursion on the boundaries between partitions.
+    # TODO Separate this into two variables?
+
+    global_array = cp.random.randint(0, 100000000000, size=args.m * args.num_gpus).astype(cp.int32)
+    # global_array = np.arange(args.m * args.num_gpus, dtype=np.int32)
+    # np.random.shuffle(global_array)
+
     cupy_list_A = []
     cupy_list_B = []
     for i in range(args.num_gpus):
         with cp.cuda.Device(i) as dev:
-            random_array = cp.asarray(global_array[m*i:m*(i+1)])
+            random_array = cp.asarray(global_array[args.m * i:args.m * (i + 1)])
             cupy_list_A.append(random_array)
-            cupy_list_B.append(cp.empty(m, dtype=cp.int32))
-    
+            cupy_list_B.append(cp.empty(args.m, dtype=cp.int32))
+
     for i in range(args.num_gpus):
         with cp.cuda.Device(i) as dev:
             dev.synchronize()
@@ -303,26 +260,64 @@ def main():
     A = cupy_list_A
     workspace = cupy_list_B
 
-    #Compute parition size prefix
-    sizes = np.zeros(len(A) + 1, dtype=np.uint32)
-    for i in range(len(A)):
-        sizes[i + 1] = len(A[i])
-    size_prefix = np.cumsum(sizes)
-
 
     with Parla():
         T = TaskSpace("T")
         t_start = time.perf_counter()
-        quicksort(1, size_prefix, A, workspace, 0, m * args.num_gpus, T)
+        quicksort(A, workspace, 1, T)
         T.wait()
         t_end = time.perf_counter()
 
     print("Time: ", t_end - t_start)
 
-    print("Sorted")
-    for array in A:
-        print(array)
+    # print("Sorted")
+    # for array in A:
+    #     print(array)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-dev_config", type=str, default="devices_sample.YAML")
+    parser.add_argument("-num_gpus", type=int, default=2)
+    parser.add_argument("-m", type=int, default=10000, help="Size of array per GPU.")
+    args = parser.parse_args()
+    main(args)
+
+"""
+    start = int(start)
+    end = int(end)
+
+    # # How to select the active block from the global array
+    start_block_idx = np.searchsorted(global_prefix, start, side="right") - 1
+    end_block_idx = np.searchsorted(global_prefix, end, side="right") - 1
+
+    # Split within a block at the endpoints (to form slices)
+    start_local_offset = start - global_prefix[start_block_idx]
+    end_local_offset = end - global_prefix[end_block_idx]
+
+    start_local_offset = (int)(start_local_offset)
+    end_local_offset = (int)(end_local_offset)
+
+    A = []
+    workspace = []
+
+    #Reform a global array out of sliced components (NOTE: THESE SEMANTICS BREAK PARRAY. Concurrent slices cannot be written)
+    if start_block_idx == end_block_idx and start_local_offset < end_local_offset:
+        A.append(global_A[start_block_idx][start_local_offset:end_local_offset])
+        workspace.append(global_workspace[start_block_idx])
+    else:
+        if (start_block_idx < end_block_idx) and (
+            start_local_offset < len(global_A[start_block_idx])
+        ):
+            A.append(global_A[start_block_idx][start_local_offset:])
+            workspace.append(global_workspace[start_block_idx][start_local_offset:])
+
+        for i in range(start_block_idx + 1, end_block_idx):
+            A.append(global_A[i])
+            workspace.append(global_workspace[i])
+
+        if (end_block_idx < len(global_A)) and end_local_offset > 0:
+            A.append(global_A[end_block_idx][:end_local_offset])
+            workspace.append(global_workspace[end_block_idx][:end_local_offset])
+"""

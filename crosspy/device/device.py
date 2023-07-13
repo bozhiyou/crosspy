@@ -13,9 +13,6 @@ class Device(nullcontext, metaclass=ABCMeta):
 
     As devices are logical, the runtime may choose to implement two devices using the same hardware.
     """
-    architecture: "Architecture"
-    index: Optional[int]
-
     @lru_cache(maxsize=None)
     def __new__(cls, *args, **kwargs):
         return super(Device, cls).__new__(cls)
@@ -25,10 +22,14 @@ class Device(nullcontext, metaclass=ABCMeta):
         Construct a new Device with a specific architecture.
         """
         super().__init__()
-        self.architecture = architecture
-        self.index = index  # index of gpu
+        self.architecture: "Architecture" = architecture
+        self.index: Optional[int] = index  # index of gpu
         self.args = args
         self.kwds = kwds
+
+    @property
+    def id(self):
+        return self.index
 
     @property
     @abstractmethod

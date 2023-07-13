@@ -5,7 +5,6 @@ import threading
 
 from typing import Collection, List, Optional
 
-from parla.environments import EnvironmentComponentInstance, TaskEnvironment, EnvironmentComponentDescriptor
 from . import cuda
 
 try:

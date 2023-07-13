@@ -1,8 +1,13 @@
+import numpy
+
+from contextlib import contextmanager, nullcontext
 from typing import Dict
 
 import os
 import psutil
 
+import crosspy
+from crosspy import context
 from crosspy.utils import array
 from ..device import Architecture, Memory, Device, MemoryKind
 
@@ -35,6 +40,48 @@ class _CPUMemory(Memory):
         return array.asnumpy(target)
 
 
+class NumPyCarrier:
+    def pull(self, src, copy=False, out=None, **kwargs):
+        if isinstance(src, crosspy.ndarray):
+            if src.nparts != 1:
+                raise ValueError("use tobuffer() to pull CrossPy array over %d devices" % src.nparts)
+            src = src.item()
+        if isinstance(src, numpy.ndarray):
+            if out is not None:
+                if copy or (out is not src):
+                    out[:] = src
+                return src
+            if copy:
+                return src.astype(src.dtype, copy=True)
+            return src
+        # TODO rewrite using register paradigm
+        import cupy
+        from crosspy.device.gpu.cuda.cupy_based import _pinned_memory_empty_like
+        if isinstance(src, cupy.ndarray):
+            stream = kwargs.pop('stream', None)
+            res = _pinned_memory_empty_like(src) if out is None else out
+            if stream is not None:
+                return src.get(stream=stream, out=res)
+            with src.device:
+                with cupy.cuda.Stream(non_blocking=True) as stream:
+                    src.get(stream=stream, out=res)
+                stream.synchronize()
+            return res
+        try:
+            return numpy.array(src)
+        except BaseException:
+            raise TypeError(f"{type(src)} is not supported yet")
+
+    @property
+    def module(self):
+        return numpy
+
+@context.register(numpy)
+@contextmanager
+def numpy_context(obj, **kwargs):
+    yield NumPyCarrier()
+
+
 class _CPUDevice(Device):
     def __init__(
         self, architecture: "Architecture", index, *args, n_cores, **kws
@@ -65,6 +112,9 @@ class _CPUDevice(Device):
 
     def __repr__(self):
         return "<CPU {}>".format(self.index)
+    
+    def __enter__(self):
+        return NumPyCarrier()
 
 
 class _GenericCPUArchitecture(Architecture):

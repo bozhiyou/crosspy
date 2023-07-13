@@ -1,1 +1,1 @@
-from .ldevice import PartitionScheme, partition
+from .ldevice import PartitionScheme, split

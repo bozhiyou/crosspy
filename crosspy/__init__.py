@@ -6,13 +6,11 @@ Provides
   1. Arbitrary slicing
 
 """
-import warnings
-warnings.simplefilter("default")
-
-from typing import Iterable, Optional
-from types import ModuleType
-
+from ._backend import set_backend
 import numpy
+
+# set_backend(numpy)
+
 try:
     import cupy
     import cupy.cuda
@@ -33,47 +31,37 @@ except (ImportError, AttributeError) as e:
 #         except RuntimeError:
 #             pass
 
+from typing import Iterable, Optional
 
-from .device.cpu import cpu
+import warnings
+warnings.simplefilter("default")
+
+from . import random, utils
+
+from crosspy.device import get_device
+from crosspy.device.cpu import cpu
 if cupy:
     from .device.gpu import gpu
     from .utils.cupy import _pin_memory, _pinned_memory_empty, _pinned_memory_empty_like
 
 from .core import CrossPyArray
+ndarray = CrossPyArray
+from .core import empty, zeros, ones
+from .core import empty_like, zeros_like, ones_like
 
-from .partition import PartitionScheme, partition
+from .partition import PartitionScheme, split
 
-from .transfer import alltoallv, all2ints, alltoall, assignment
+from .transfer import alltoallv, alltoall
 
-from . import utils
+from crosspy.utils.wrapper import DynamicObjectManager
 
 # from .device import get_all_devices
 # print(get_all_devices())
 
-__all__ = ['numpy', 'cupy', 'array', 'cpu', 'gpu', 'PartitionScheme', 'partition']
-
-class PerObjWrapper:
-    initial_devices = {}
-    initial_shapes = {}
-
-    def __init__(self, wrapper, perserve_device=False, perserve_shape=False) -> None:
-        def attr_wrapper(obj, *args, **kwds):
-            device_ = getattr(obj, "device", "cpu") if perserve_device else None
-            shape_ = getattr(obj, "shape", None) if perserve_shape else None
-
-            wrapped_obj = wrapper(obj, *args, **kwds)
-
-            if not hasattr(wrapped_obj, "device") and device_ is not None:
-                self.initial_devices[id(wrapped_obj)] = device_
-            if not hasattr(wrapped_obj, "shape") and shape_ is not None:
-                self.initial_shapes[id(wrapped_obj)] = shape_
-
-            return wrapped_obj
-
-        self._wrapper = attr_wrapper
-
-    def __call__(self, obj, *args, **kwds):
-        return self._wrapper(obj, *args, **kwds)
+__all__ = [
+    'random', 'utils',
+    'numpy', 'cupy', 'array', 'cpu', 'gpu', 'PartitionScheme', 'split'
+    ]
 
 
 def array(
@@ -89,10 +77,10 @@ def array(
     # byteorder=None,
     # copy=True,
     axis: Optional[int] = None,
-    dim: Optional[int] = None,
+    dim: Optional[int] = None,  # DEPRECATED
     *,
     distribution=None,
-    wrapper=None,
+    data_manager=None,
 ):# -> CrossPyArray:
     """
     Create a CrossPy array.
@@ -102,7 +90,7 @@ def array(
     :param shape: Same to ``numpy.array``.
     :param axis: Concatenate ``obj`` along ``axis``.
     :param distribution: Partition ``obj`` according to ``distribution`` scheme. Same as ``partition(obj, distribution)``.
-    :param wrapper: Applied to each subarray.
+    :param data_manager: Applied to each subarray.
     :return: A CrossPy array.
     :rtype: class:`CrossPyArray`
     """
@@ -112,53 +100,45 @@ def array(
         warnings.warn(DeprecationWarning("`dim` is deprecated; use `axis` instead"))
     axis = dim if dim is not None else axis
 
-    if wrapper is not None:
-        wrapper = PerObjWrapper(wrapper, perserve_device=True, perserve_shape=True)
-
     if distribution is not None:
-        obj = partition(obj, distribution=distribution, wrapper=wrapper)
+        obj = split(obj, distribution=distribution, axis=axis)
+
+    # Parla-specific
+    if data_manager is not None:
+        assert isinstance(data_manager, DynamicObjectManager), "`data_manager` should be derived from `utils.DynamicObjectManager`"
 
     from .utils.array import is_array
     def inner(obj, axis):
-        if is_array(obj):  # numpy, cupy, crosspy
-            if wrapper:
-                arr = CrossPyArray(wrapper(obj), axis=axis, initial_devices=wrapper.initial_devices, initial_shapes=wrapper.initial_shapes)
-            else:
-                arr = CrossPyArray(obj, axis=axis)
-        elif isinstance(obj, (list, tuple)):
+        if isinstance(obj, (list, tuple)):
             obj = type(obj)(x if is_array(x) else inner(x, None if axis in (None, 0) else axis - 1) for x in obj)
             assert all(is_array(a) for a in obj)
-            if wrapper:
-                arr = CrossPyArray(type(obj)(wrapper(a)for a in obj), axis, initial_devices=wrapper.initial_devices, initial_shapes=wrapper.initial_shapes)
-            else:
-                arr = CrossPyArray(obj, axis=axis)
         else:
-            raise NotImplementedError("cannot convert %s to CrossPy array" % type(obj))
+            assert is_array(obj), NotImplementedError("cannot convert %s to CrossPy array" % type(obj))
 
-        assert isinstance(arr, CrossPyArray), type(arr)
-        return arr
-    
+        return CrossPyArray.fromobject(obj, axis=axis, data_manager=data_manager).finish()
+
     return inner(obj, axis=axis)
 
 def asnumpy(input: CrossPyArray):
     return numpy.asarray(input)
 
-def zeros(shape, placement):
+def zeros(shape, distribution):
     """
-    Only support 1-D placement.
+    Only support 1-D distribution.
     """
     if not isinstance(shape, (tuple, list)):
         shape = (shape,)
-    n_parts = len(placement)
-    sub_shapes = [(shape[0] // n_parts, *shape[1:]) for i in range(n_parts)]
+    n_parts = len(distribution)
+    axis = 0
+    sub_shapes = [(*shape[:axis], shape[axis] // n_parts, *shape[axis + 1:]) for _ in range(n_parts)]
     if shape[0] != shape[0] // n_parts * n_parts:
-        sub_shapes[-1] = (n_parts - shape[0] // n_parts * (n_parts - 1), *shape[1:])
+        sub_shapes[-1] = (*shape[:axis], n_parts - shape[0] // n_parts * (n_parts - 1), *shape[axis + 1:])
     def array_gen(i: int):
-        if isinstance(placement[i], gpu(0).__class__): # TODO this is an ugly check
-            with placement[i].cupy_device:
-                return placement[i].get_array_module().zeros(sub_shapes[i])
-        return placement[i].get_array_module().zeros(sub_shapes[i])
-    return CrossPyArray.from_shapes(sub_shapes, array_gen, dim=0)
+        if isinstance(distribution[i], gpu(0).__class__): # TODO this is an ugly check
+            with distribution[i].cupy_device:
+                return distribution[i].get_array_module().zeros(sub_shapes[i])
+        return distribution[i].get_array_module().zeros(sub_shapes[i])
+    return CrossPyArray.fromobject([array_gen(i) for i in range(n_parts)], axis=0).finish()
 
 def to(input, device: int):
     """
@@ -171,18 +151,3 @@ def to(input, device: int):
     :return: NumPy array if ``device`` refers to CPU, otherwise CuPy array.
     """
     return input.to(device)
-
-
-def config_backend(backend):
-    if isinstance(backend, ModuleType):
-        backend = backend.__name__
-    import sys
-    submodules = {}
-    for k, v in sys.modules.items():
-        if k.startswith(f"{backend}."):
-            setattr(sys.modules[__name__], k[len(backend) + 1:], v)
-            submodules[k.replace(backend, __name__)] = v
-    sys.modules.update(submodules)
-
-
-config_backend(numpy)

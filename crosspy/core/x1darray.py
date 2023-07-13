@@ -5,10 +5,11 @@ Async IO
 from collections import defaultdict
 
 import numpy
-from crosspy import cupy, _pinned_memory_empty
+from crosspy.context import context
 from crosspy.device import get_device
 from crosspy.utils.array import get_array_module
 from crosspy.transfer.cache import fetch
+from crosspy.utils.cupy import _pinned_memory_empty
 
 
 class Vocabulary(list):
@@ -36,9 +37,33 @@ class _Metadata:
             device_array[dev_id][index]
         """
 
+    def __len__(self):
+        return len(self.block_offset)
+
     def __iter__(self):
         """Implemented to support unpacking"""
         return iter((self.block_offset, self.device_idx, self.device_offset))
+    
+
+    def __eq__(self, __value: '_Metadata') -> bool:
+        return self is __value or all(
+            (a is b or numpy.array_equal(a, b) for a, b in zip(self, __value))
+        )
+
+    def _global_index_to_block_id(self, i, out=None, stream=None):
+        """
+        Computes which block the referred element resides in
+
+        Return shape and device is same to input indices unless out is given
+        """
+        with context(i) as ctx:
+            _py = ctx.module
+            assert hasattr(_py, 'searchsorted'), TypeError("Indices can only be numpy.ndarray or cupy.ndarray, not %s" % type(i))
+            block_offset_ = ctx.pull(self.block_offset, copy=False, stream=stream)
+            blk_id = _py.searchsorted(block_offset_, i, side='right')
+        if out is not None:
+            out[...] = blk_id
+        return blk_id
 
 
 class X1D:
@@ -69,7 +94,8 @@ class X1D:
             with device_vocab[did]:
                 self.device_array[did] = get_array_module(objs[bids[0]]).concatenate([objs[i] for i in bids], axis=axis)
 
-    def get_metadata(self):
+    @property
+    def metadata(self):
         return self._metadata
 
     def __len__(self):
@@ -98,7 +124,7 @@ class X1D:
             local_block_offset = fetch(self._metadata.block_offset, here, stream)
             local_device_offset = fetch(self._metadata.device_offset, here, stream)
             mask = (blk_id > 0)
-            i[mask] = i[mask] - local_block_offset[blk_id[mask] - 1] + local_device_offset[blk_id[mask]]
+            i[mask] = i[mask] - local_device_offset[blk_id[mask]]
             return i
 
     def __getitem__(self, index):

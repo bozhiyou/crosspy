@@ -13,7 +13,7 @@ test_w_sklearn=False
 kmeans_pp = False
 kmeans_maxit = 20
 dim = 10
-NUM_GPUS = 4
+NUM_GPUS = 2
 gpus = [gpu(i) for i in range(NUM_GPUS)]
 
 # generate data
@@ -38,14 +38,14 @@ else:
     # generate initial guess for clusters
     cpos  = np.random.randint(0,n,nc)
 Ch = Xh[cpos,:]
-X = xp.array(Xh, placement=gpus) 
-C = xp.array(Ch, placement=gpus)
+X = xp.array(Xh, distribution=gpus, axis=0)
+C = xp.array(Ch, distribution=gpus, axis=0)
 
 print('allocating memory')
-D = xp.zeros((n,nc), placement=gpus)
-W = xp.zeros((n,dim), placement=gpus)
-L = xp.zeros(n, placement=gpus)
-L0= xp.zeros(n, placement=gpus)
+D = xp.zeros((n,nc), distribution=gpus)
+W = xp.zeros((n,dim), distribution=gpus)
+L = xp.zeros(n, distribution=gpus)
+L0= xp.zeros(n, distribution=gpus)
 
 print('kmeans iteration')
 tic = time()
@@ -59,8 +59,8 @@ for j in range(kmeans_maxit):
 
     for k in range(nc):
         m = cp.sum(L==k)
-        with m.item().device:
-            assert m.item() != 0, "cannot handle corner case when centers are repetitive: %s in %s" % (cpos[k], cpos)
+        with m.device:
+            assert m.item() != 0, "centers should be unique; repetition: %s in %s" % (cpos[k], cpos)
         ck = 1/m *cp.sum(X[L==k,:],axis=0)
         C[k,:]=ck
 

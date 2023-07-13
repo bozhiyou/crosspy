@@ -39,6 +39,7 @@ extensions = [
   'sphinx.ext.todo',
   'sphinx.ext.mathjax',
   # 'sphinx.ext.viewcode'
+  # "myst_parser",
   "myst_nb",
 ]
 
@@ -84,3 +85,8 @@ html_show_sourcelink = False
 
 nb_execution_mode = "cache"
 nb_execution_in_temp = True
+
+myst_heading_anchors = 3
+# myst_enable_extensions = [
+#   "attrs_inline",
+# ]

@@ -1,7 +1,7 @@
 import numpy as np
 import cupy as cp
 import crosspy as xp
-from crosspy import gpu
+from crosspy import cpu, gpu
 
 from crosspy.utils import recipe
 
@@ -11,6 +11,56 @@ def array_list_equal(la, lb):
         if not (a == b).all():
             return False
     return True
+
+
+def test_random():
+    a = xp.random.rand()
+    assert isinstance(a, float)
+
+    a = xp.random.rand(device=gpu(1))
+    assert isinstance(a, cp.ndarray)
+    assert a.device.id == 1
+    assert a.shape == ()
+
+    a = xp.random.rand(1)
+    assert isinstance(a, np.ndarray)
+    assert a.shape == (1,)
+
+    a = xp.random.rand(1, device=gpu(1))
+    assert isinstance(a, cp.ndarray)
+    assert a.shape == (1,)
+    assert a.device.id == 1
+
+    a = xp.random.rand([2, 1], device=gpu(1))
+    assert a.shape == (3,)
+
+    a = xp.random.rand([2, 1], device=[gpu(1), gpu(0)])
+    assert a.shape == (3,)
+
+    # corner cases
+    a = xp.random.rand(0)
+    assert isinstance(a, np.ndarray)
+    assert a.shape == (0,)
+
+    a = xp.random.rand(0, device=gpu(1))
+    assert isinstance(a, cp.ndarray)
+    assert a.device.id == 1
+    assert a.shape == (0,)
+
+    # bad cases
+    try: a = xp.random.rand([], [])
+    except TypeError: pass
+
+    try: a = xp.random.rand([2, 1], device=[gpu(1)])
+    except ValueError: pass
+
+
+def test_like():
+    proto = xp.random.rand([2, 3, 4], device=[gpu(1), cpu(0), gpu(0)])
+
+    x = xp.empty_like(proto)
+    x = xp.zeros_like(proto)
+    x = xp.ones_like(proto)
 
 def test_create():
     x_cpu = np.array([1, 2, 3, 4])
@@ -96,9 +146,6 @@ def test_create():
     # partition obj
     # generate list
 
-def test_wrapper():
-    pass
-
 def test_recipe(n=6, m=4, ngpus=2):
     a = recipe(lambda i: cp.random.rand(n//ngpus),
                lambda i: cp.cuda.Device(i),
@@ -113,4 +160,7 @@ def test_recipe(n=6, m=4, ngpus=2):
     
     
 if __name__ == '__main__':
-    test_create()
+    test_random()
+    test_like()
+    print(xp.empty([2,4], device=[gpu(0), gpu(1)]))
+    # test_create()

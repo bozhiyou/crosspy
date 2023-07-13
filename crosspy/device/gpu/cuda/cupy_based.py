@@ -1,22 +1,22 @@
-from abc import ABCMeta
-from contextlib import contextmanager
-
-import logging
-from functools import wraps, lru_cache
-from typing import Dict, List
-
-from crosspy.device.device import Architecture
-
-from ...device import MemoryKind, Memory, Architecture, Device
-
-import numpy
-
-logger = logging.getLogger(__name__)
-
 import cupy
 import cupy.cuda
 
-from math import log2
+import crosspy
+from crosspy import context
+from crosspy import device
+from crosspy.device import Architecture, Device, get_device, MemoryKind, Memory
+
+from abc import ABCMeta
+from contextlib import contextmanager, nullcontext
+from functools import wraps, lru_cache
+import os
+
+import numpy
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 __all__ = ["gpu", "cupy"]
 
@@ -33,6 +33,71 @@ def _pin_memory(array):
     ret[...] = array
     return ret
 
+
+@device.of(cupy.ndarray)
+def default_cupy_device(np_arr):
+    assert(isinstance(np_arr, (cupy.ndarray)))
+    return gpu(np_arr.device.id)
+
+
+class CuPyCarrier:
+    def __init__(self, stream=None):
+        self.stream = stream
+
+    def __del__(self):
+        if self.stream:
+            self.stream.synchronize()
+
+    @property
+    def module(self):
+        return cupy
+
+    def pull(self, src, out=None, copy=False):
+        if isinstance(src, crosspy.ndarray):
+            if src.shape != ():
+                raise ValueError("use tobuffer() to pull non-scalars")
+            src = src.item()
+        if isinstance(src, numpy.ndarray):
+            buf = cupy.empty(src.shape, dtype=src.dtype) if out is None else out
+            buf.set(src, stream=self.stream)
+            return buf
+        if isinstance(src, cupy.ndarray):
+            dev_id = cupy.cuda.runtime.getDevice()
+            if out is not None and out.device.id != dev_id:
+                raise ValueError("`out` on device %d is different from current device %d" % (out.device.id, dev_id))
+            if src.device.id == dev_id and out is None:
+                return src if not copy else src.astype(src.dtype, copy=True)
+            buf = cupy.empty(src.shape, dtype=src.dtype) if out is None else out
+            buf.data.copy_from_device_async(src.data, src.nbytes, stream=self.stream)
+            return buf
+        try:
+            return cupy.array(src)
+        except BaseException:
+            raise TypeError(f"{type(src)} is not supported yet")
+
+    def copy(self, dst, dst_idx, src, src_idx, stream=None):
+        src_buf = src[src_idx]
+        dst_buf = dst[dst_idx]
+        if isinstance(src, numpy.ndarray):
+            dst_buf.set(src_buf, stream=stream or self.stream)
+            return
+        if isinstance(src, cupy.ndarray):
+            dst_buf.data.copy_from_device_async(src_buf.data, src_buf.nbytes, stream=stream or self.stream)
+            return
+        raise TypeError(f"{type(src)} is not supported yet")
+
+@context.register(cupy)
+@contextmanager
+def cupy_context(obj, stream=None):
+    with get_device(obj) as ctx:
+        if stream is None:
+            yield ctx
+            return
+        if isinstance(stream, dict):
+            stream = cupy.cuda.Stream(**stream)
+        yield CuPyCarrier(stream)
+
+
 class _DeviceCUPy:
     def __init__(self, ctx: "_GPUDevice"):
         self._ctx: "_GPUDevice" = ctx
@@ -44,7 +109,7 @@ class _DeviceCUPy:
             def _wrap_for_device(ctx: "_GPUDevice", f):
                 @wraps(f)
                 def ff(*args, **kwds):
-                    with ctx._device_context():
+                    with ctx.cupy_device_context():
                         return f(*args, **kwds)
 
                 return ff
@@ -102,39 +167,36 @@ class _GPUMemory(Memory):
 class _GPUDevice(Device, metaclass=ABCMeta):
     def __init__(self, architecture: "_GPUArchitecture", index, *args, **kwds):
         try:
-            with cupy.cuda.Device(index) as d:
-                with cupy.cuda.Stream(non_blocking=True):
-                    # cupy.cuda.alloc(2 ** min(30, int(log2(d.mem_info[0]))))  # TODO config prealloc
-                    cupy.cuda.alloc(d.mem_info[0] - (d.mem_info[0] % 2**30))  # maximize prealloc to GB
-        except Exception as e:
+            with cupy.cuda.Device(index) as self._d:
+                with cupy.cuda.Stream(non_blocking=True) as self._s:
+                    if os.getenv('CUPY_INIT_MEMPOOL', '1') not in ('0', 'false', 'False'):
+                        # TODO config prealloc
+                        cupy.cuda.alloc(self._d.mem_info[0] & ~((1 << 30) - 1))  # maximize prealloc to GB
+        except cupy.cuda.runtime.CUDARuntimeError as e:
             raise RuntimeError(e.args[0] + " %d" % index)
         super().__init__(architecture, index, *args, **kwds)
 
-    @property
-    @lru_cache(None)
-    def resources(self) -> Dict[str, float]:
-        dev = cupy.cuda.Device(self.index)
-        free, total = dev.mem_info
-        attrs = dev.attributes
-        return dict(
-            threads=attrs["MultiProcessorCount"] *
-            attrs["MaxThreadsPerMultiProcessor"],
-            memory=total,
-            vcus=1
-        )
-
-    # @property
-    # def default_components(self) -> Collection["component.EnvironmentComponentDescriptor"]:
-    #     return [component.GPUComponent()]
-
-    @contextmanager
-    def _device_context(self):
-        with self.cupy_device:
-            yield
+    def __del__(self):
+        self._s.synchronize()
+        self._d.synchronize()
 
     @property
     def cupy_device(self):
         return cupy.cuda.Device(self.index)
+
+    @property
+    @lru_cache(None)
+    def resources(self):
+        dev = cupy.cuda.Device(self.index)
+        free, total = dev.mem_info
+        attrs = dev.attributes
+        threads = attrs["MultiProcessorCount"] * attrs["MaxThreadsPerMultiProcessor"]
+        return free, total, threads
+
+    @contextmanager
+    def cupy_device_context(self):
+        with self.cupy_device:
+            yield
 
     @lru_cache(None)
     def memory(self, kind: MemoryKind = None):
@@ -145,37 +207,37 @@ class _GPUDevice(Device, metaclass=ABCMeta):
 
     def __repr__(self):
         return "<CUDA {}>".format(self.index)
+    
+    def __enter__(self):
+        self._d.__enter__()
+        self._s.__enter__()
+        return CuPyCarrier(self._s)
+
+    def __exit__(self, *exctype):
+        self._s.__exit__(*exctype)
+        self._d.__exit__(*exctype)
 
 
 class _GPUArchitecture(Architecture):
-    _devices: List[_GPUDevice]
+    _devices: list[_GPUDevice]
 
     def __init__(self, name, id):
         super().__init__(name, id)
-        devices = []
-        if not cupy:
-            self._devices = []
-            return
-        for device_id in range(2**16):
-            cupy_device = cupy.cuda.Device(device_id)
-            try:
-                cupy_device.compute_capability
-            except cupy.cuda.runtime.CUDARuntimeError:
-                break
-            assert cupy_device.id == device_id
-            devices.append(self(cupy_device.id))
-        self._devices = devices
+        self._devices = [_GPUDevice(self, device_id) for device_id in range(cupy.cuda.runtime.getDeviceCount())]
 
     @property
     def devices(self):
         return self._devices
 
+    def __getitem__(self, index):
+        return self._devices[index]
+    
     def __call__(self, index, *args, **kwds):
-        return _GPUDevice(self, index, *args, **kwds)
+        return self._devices[index]
 
 _GPUDevice.register(cupy.cuda.Device)
 gpu = _GPUArchitecture("GPU", "gpu")
-gpu.__doc__ = """The `~parla.device.Architecture` for CUDA GPUs.
+gpu.__doc__ = """Architecture for CUDA GPUs.
 
 >>> gpu(0)
 """

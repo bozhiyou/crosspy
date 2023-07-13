@@ -11,17 +11,21 @@ For arbitrary coloring:
     token is (device, index) pair
     memory is retriving from device_to_data dict
 """
-import warnings
 
-import bisect
+from typing import List, Optional, Tuple, Collection, Mapping, Union, Any
+from numbers import Integral
+
+from warnings import warn
+
 import functools
 import inspect
 from abc import abstractmethod, ABCMeta
 from collections import defaultdict
 from functools import reduce
 from math import floor, ceil
-from typing import Iterable, List, Optional, Tuple, Collection, Mapping, Union, Any
-from warnings import warn
+
+from crosspy.context import context
+from crosspy.utils.array import is_array
 
 from ..core.ndarray import IndexType
 from ..device import Device, Memory, MemoryKind
@@ -85,7 +89,7 @@ class PartitionScheme:
         self._devid_to_index[device_id].append(index)
         part_order = _first_i(index)
         if part_order in self._keys:
-            warnings.warn(RuntimeWarning("Overwritten device mapping at index %d" % part_order))
+            warn(RuntimeWarning("Overwritten device mapping at index %d" % part_order))
         self._keys[part_order] = data_key
 
     def __getitem__(self, index: IndexType):
@@ -155,20 +159,117 @@ class LDeviceSequenceArbitrary:
         ]
 
 
-def partition(arr, distribution, wrapper=None):
-    wrapper = wrapper or (lambda x: x)
-    if isinstance(distribution, list):
-        from .ldevice import LDeviceSequenceBlocked
-        Partitioner = LDeviceSequenceBlocked
-        mapper = Partitioner(len(distribution), placement=distribution)
-        arr_p = mapper.partition_tensor(arr, wrapper=wrapper)
-        return arr_p
-    from .ldevice import LDeviceSequenceArbitrary
-    Partitioner = LDeviceSequenceArbitrary
-    mapper = Partitioner(distribution)
-    arr_p = mapper.partition_tensor(arr, wrapper=wrapper)
-    return arr_p
+def split(array_like, distribution, axis=None, mode=None):
+    """
+    :param distribution:
+        - An iterable of devices. In this case, the array-like object can will be
+        devided (almost) equally. Size of each partition is guaranteed to be
+        either ceil(s) or floor(s) where s = total_size / len(devices)
+        - An iterable of integers. In this case, the array-like object will be
+        devided accordingly without changing its device (i.e. no communication)
+        except when the iterable is an array and the partitions will be on the
+        device of `distribution`. The numbers should be sizes of each partition
+        unless the last digit equals the size of `array_like`, in which case
+        the numbers are treated as size prefixes.
+        - An iterable of (device, integer) pairs, which can typically be a zip
+        or dict.items object
+    :param mode:
+        Specifies how out-of-bounds `distribution` will behave.
+        - None - Skip all checks (default)
+        - 'raise' - raise an error
+        - 'wrap' - wrap around
+        - 'clip' - clip to the range
+        'clip' mode means that sizes that are larger than the size of `array_like`
+        will be ignored.
+    """
+    # TODO support axis with swapaxis. reference numpy.split
+    # TODO support single integer split
+    # TODO flatten array when axis is None
+    # TODO support singleton (non-list)
+    # TODO pairs by crosspy array
+    assert mode is None, NotImplementedError("TODO")
+    # sizes by array
+    if is_array(distribution):
+        if len(distribution) == 0:
+            return []
+        assert distribution.dtype.kind == 'i', f"array of sizes must have integer dtype, not {distribution.dtype}"
+        partitions = []
+        with context(distribution) as ctx:
+            array_like_ = ctx.pull(array_like)
+            if distribution[len(distribution) - 1] == len(array_like_):
+                stops = distribution
+            else:
+                _py = ctx.module
+                stops = _py.cumsum(distribution)
+            start = 0
+            for stop in stops:
+                partitions.append(array_like_[start:stop])
+                start = stop
+        return partitions
 
+    try:
+        nparts = len(distribution)
+    except TypeError:
+        distribution = (*distribution,)
+        nparts = len(distribution)
+
+    if nparts == 0:
+        return []
+    
+    partitions = []
+    try:
+        peeked = distribution[0]
+    except TypeError:
+        distribution = (*distribution,)
+        peeked = distribution[0]
+    start = 0
+    if isinstance(peeked, Device):
+        size = array_like.shape[axis] if axis else len(array_like)
+        subsize, nbalance = divmod(size, nparts)
+        for i in range(nbalance):
+            device = distribution[i]
+            # assert isinstance(device, Device), "inconsistent distribution element type"
+            stop = start + subsize + 1
+            with device as ctx:
+                partitions.append(ctx.pull(array_like[start:stop]))
+            start = stop
+        for i in range(nbalance, nparts):
+            device = distribution[i]
+            # assert isinstance(device, Device), "inconsistent distribution element type"
+            stop = start + subsize
+            with device as ctx:
+                partitions.append(ctx.pull(array_like[start:stop]))
+            start = stop
+        # OLD IMPLEMENTATION
+        # from .ldevice import LDeviceSequenceBlocked
+        # Partitioner = LDeviceSequenceBlocked
+        # mapper = Partitioner(len(distribution), placement=distribution)
+        # arr_p = mapper.partition_tensor(array_like)
+        # return arr_p
+        return partitions
+    if isinstance(peeked, Integral):
+        if distribution[len(distribution) - 1] == len(array_like):
+            for stop in distribution:
+                # assert isinstance(size, int), "inconsistent distribution element type"
+                partitions.append(array_like[start:stop])
+                start = stop
+        else:
+            for size in distribution:
+                # assert isinstance(size, int), "inconsistent distribution element type"
+                stop = start + size
+                partitions.append(array_like[start:stop])
+                start = stop
+        return partitions
+    if isinstance(peeked, tuple):
+        for device, size in distribution:
+            assert isinstance(device, Device), TypeError("inconsistent distribution element type")
+            assert isinstance(size, int), TypeError("inconsistent distribution element type")
+            stop = start + size
+            with device as ctx:
+                partitions.append(ctx.pull(array_like[start:stop]))
+            start = stop
+        return partitions
+    raise TypeError(f"Unrecognizable distribution with type {type(peeked)}")
 
 def _factors(n: int) -> List[int]:
     for m in range(2, ceil(n**0.5) + 1):

@@ -2,7 +2,7 @@ import numpy
 import cupy
 
 def _pinned_memory_empty(shape, dtype):
-    mem = cupy.cuda.alloc_pinned_memory(numpy.prod(shape) * dtype().itemsize)
+    mem = cupy.cuda.alloc_pinned_memory(numpy.prod(shape) * (dtype().itemsize if isinstance(dtype, type) else dtype.itemsize))
     ret = numpy.frombuffer(mem, dtype, numpy.prod(shape)).reshape(shape)
     return ret
 

@@ -5,12 +5,13 @@ from contextlib import nullcontext
 from functools import lru_cache
 
 import numpy
-from crosspy import cupy, _pin_memory, _pinned_memory_empty_like
+from crosspy import cupy
+from crosspy.utils.cupy import _pin_memory, _pinned_memory_empty_like
 
 from crosspy.device import get_device
-from crosspy.utils.array import get_array_module
 
-from .cache import same_place, any_to_cuda, pull, pull_to
+from .cache import same_place, any_to_cuda
+
 
 # compute masks and local indices
 def get_blkid(i, local_block_offset, out=None):
@@ -154,12 +155,17 @@ class Channel:
         dst = target.device_array[ddid]
         with self.src.device as sdevice:
             with self.src_stream as sstrm:
-                buf = src[self.srcidx]
+                sendbuf = src[self.srcidx]
         await asyncio.sleep(0)
         with self.dst.device as ddevice:
             with self.dst_stream as dstrm:
                 sstrm.synchronize()
-                dst[self.dstidx].data.copy_from_device_async(buf.data, buf.nbytes, stream=sstrm)
+                recvbuf = cupy.empty(sendbuf.shape, dtype=sendbuf.dtype)
+                recvbuf.data.copy_from_device_async(sendbuf.data, sendbuf.nbytes, stream=dstrm)
+        await asyncio.sleep(0)
+        with self.dst.device as ddevice:
+            with self.dst_stream as dstrm:
+                dst[self.dstidx] = recvbuf
         await asyncio.sleep(0)
         with self.dst.device as ddevice:
             with self.dst_stream as dstrm:
@@ -167,11 +173,21 @@ class Channel:
 
 class alltoall:
     def __init__(self, target, dst_indices, source, src_indices, debug=None):
-        # assert dst_indices.dtype.kind == src_indices.dtype.kind == 'u', \
-        #     "Only support indices of unsigned dtype (got %s/%s)" % (dst_indices.dtype, src_indices.dtype)
+        assert dst_indices.dtype.char in ['l', 'L'] and src_indices.dtype.char in ['l', 'L'], \
+            "Only support indices of 64-bit dtype (got %s/%s); use astype for conversion" % (dst_indices.dtype, src_indices.dtype)
         self.source = source
         self.target = target
-        asyncio.run(self.init_async(target, dst_indices, source, src_indices, debug))
+        init_coro = self.init_async(target, dst_indices, source, src_indices, debug)
+        try:
+            asyncio.run(init_coro)
+        except RuntimeError:
+            self.init_coro = init_coro
+        else:
+            self.init_coro = None
+
+    def __await__(self):
+        if self.init_coro:
+            return self.init_coro.__await__()
 
     async def init_async(self, target, target_indices, source, source_indices, debug=None):
         if isinstance(target_indices, numpy.ndarray):
@@ -194,8 +210,8 @@ class alltoall:
             ))
 
         await asyncio.gather(
-                _endpoint_setup(src_proxies, source.get_metadata(), source_indices, 'src'),
-                _endpoint_setup(dst_proxies, target.get_metadata(), target_indices, 'dst')
+                _endpoint_setup(src_proxies, source.metadata, source_indices, 'src'),
+                _endpoint_setup(dst_proxies, target.metadata, target_indices, 'dst')
             )
 
         await asyncio.gather(*(
@@ -204,9 +220,15 @@ class alltoall:
 
         for n in (*src_proxies, *dst_proxies):
             n.free()
+
+        return self
     
     def __call__(self):
-        asyncio.run(self.run_async())
+        coro = self.run_async()
+        try:
+            asyncio.run(coro)
+        except RuntimeError:
+            return coro
 
     async def run_async(self):
         await asyncio.gather(*(
@@ -315,40 +337,3 @@ def alltoallv(sendbuf, sdispls, recvbuf, debug=False):
     
     for s in streams:
         s.synchronize()
-
-def all2ints(src, dest, dest_index, debug=False):
-    """
-    sendbuf [[] [] []]
-    sdispls [. . .]
-    """
-    target_bounds = dest._bounds
-    source_bounds = src._bounds
-
-    @lru_cache(maxsize=len(src._original_data))
-    def _cached(i):
-        block_local_indices = cupy.asarray(dest_index[(source_bounds[i-1] if i else 0):source_bounds[i]])
-        i_target_block_ids = cupy.sum(cupy.expand_dims(block_local_indices, axis=-1) >= cupy.asarray(target_bounds), axis=-1, keepdims=False)
-        return block_local_indices, i_target_block_ids
-
-    for i in range(len(src._original_data)):
-        for j in range(len(dest._original_data)):
-            # gather
-            with getattr(src._original_data[i], 'device', nullcontext()):
-                i_target_indices, i_target_block_ids = _cached(i)
-                gather_mask = (cupy.asarray(i_target_block_ids) == j)
-                buf = src._original_data[i][gather_mask]
-            with getattr(dest._original_data[j], 'device', nullcontext()):
-                scatter_mask = cupy.asarray(gather_mask)
-                scatter_indices_local = cupy.asarray(i_target_indices)[scatter_mask] - (target_bounds[j-1] if j else 0)
-                # assert sum(scatter_mask) == len(scatter_indices_local)
-                assert not debug or cupy.allclose(dest._original_data[j][scatter_indices_local], cupy.asarray(buf))
-                dest._original_data[j][scatter_indices_local] = cupy.asarray(buf)
-            # scatter
-
-def assignment(left, left_indices, right, right_indices):
-    if left_indices is None:
-        alltoallv(right, right_indices, left)
-    elif right_indices is None:
-        all2ints(right, left, left_indices)
-    else:
-        alltoall(left, left_indices, right, right_indices)

@@ -2,11 +2,13 @@ from collections import defaultdict
 from contextlib import nullcontext
 
 import numpy
-from crosspy import cupy, _pin_memory, _pinned_memory_empty_like
+from crosspy import cupy
+from crosspy.utils.cupy import _pin_memory, _pinned_memory_empty_like
 
 from crosspy.device import get_device, _CPUDevice, _GPUDevice
 
-device_cache = defaultdict(dict)
+# device_cache = defaultdict(dict)
+# Two objects with non-overlapping lifetimes may have the same id() value.
 
 def fetch(obj, where=None, stream=None):
     if where is None:
@@ -15,13 +17,14 @@ def fetch(obj, where=None, stream=None):
     if obj_dev == where:
         return obj
     
-    cache = device_cache[where]
-    key = id(obj)
-    if key in cache:
-        return cache[key]
+    # cache = device_cache[repr(where)]
+    # key = id(obj)
+    # if key in cache:
+    #     assert len(cache[key]) == len(obj)  # may fire
+    #     return cache[key]
     
     local_obj = pull(obj, where, stream)
-    cache[key] = local_obj
+    # cache[key] = local_obj
     return local_obj
 
 

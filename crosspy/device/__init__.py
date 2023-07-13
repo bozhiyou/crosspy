@@ -79,13 +79,13 @@ from .cpu import cpu, _CPUDevice
 DEFAULT_DEVICE = cpu(0)  # all objects default to be on cpu
 
 
-def get_device(obj, *, attr_by_id: Optional[dict] =None):
-    if hasattr(obj, 'device'):
-        return getattr(obj, 'device')
+def get_device(obj, *, reg_by_id: Optional[dict]=None):
     if type(obj) in _device_getter:
         return _device_getter[type(obj)](obj)
-    if attr_by_id and id(obj) in attr_by_id:
-        return attr_by_id[id(obj)]
+    if hasattr(obj, 'device'):
+        return getattr(obj, 'device')
+    if reg_by_id and id(obj) in reg_by_id:
+        return reg_by_id[id(obj)]
     return DEFAULT_DEVICE
 
 try:

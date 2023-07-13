@@ -19,7 +19,6 @@ User Guide
 
 .. toctree::
    :maxdepth: 1
-   :caption: Cookbook
-   :glob:
+   :caption: Fundamentals and usage
    
-   tutorial/*
+   tutorial/README

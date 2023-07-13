@@ -9,6 +9,7 @@ __all__ = ["parse_index", "IndexType"]
 T = TypeVar('T') # (PEP 484) The argument to TypeVar() must be a string equal to the variable name to which it is assigned.
 IndexType = Union[slice, int, Iterable[int], Tuple[Union[slice, Iterable[int], int]]]
 
+
 def parse_index(prefix: T, index: Tuple[Union[slice, Iterable[int], int]], step: Callable[[T, int], T], stop: Callable[[T], None]):
     """Traverse :param:`index`, update :param:`prefix` by applying :param:`step`, :param:`stop` at leaf calls.
     
