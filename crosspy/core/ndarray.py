@@ -9,13 +9,13 @@ from contextlib import nullcontext
 
 import asyncio
 import functools
-import inspect
 
 from crosspy.device import Device, get_device
 from crosspy.utils.array import ArrayType, register_array_type, get_array_module, is_array
 from .utils import _check_indexing, is_empty_slice, shape_of_slice, BasicIndexType, IndexType
 
 from crosspy.context import context
+from crosspy.dispatcher import launch, barrier
 from crosspy.transfer.cache import fetch
 
 __all__ = ['CrossPyArray', 'BasicIndexType', 'IndexType']
@@ -515,15 +515,17 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                 if not self.one_block_per_device:
                     raise NotImplementedError("Need blockwise implemenation")
                 
-                per_device_result = []
-                for did in self._metadata.device_idx:
-                    array = self.device_array[did]
+                per_device_result = {}
+                for did, array in self.device_array.items():
                     bools = xbools.device_array[did]
-                    with context(bools, stream=dict(non_blocking=True)) as ctx:
-                        _py = ctx.module
-                        if _py.any(bools):
-                            per_device_result.append(array[(*index[:self.axis], bools, *index[self.axis+1:])])
-                return CrossPyArray.fromobject(per_device_result, axis=self._concat_axis if len(per_device_result) else None).finish()
+                    def device_local_masking():
+                        with context(bools, stream=dict(non_blocking=True)) as ctx:
+                            _py = ctx.module
+                            if _py.any(bools):
+                                per_device_result[did] = array[(*index[:self.axis], bools, *index[self.axis+1:])]
+                    launch(device_local_masking)
+                barrier()
+                return CrossPyArray.fromobject([per_device_result[did] for did in self._metadata.device_idx], axis=self._concat_axis if len(per_device_result) else None).finish()
 
         # FIXME: ad hoc for 1-D
         if self._concat_axis == 0:
@@ -863,11 +865,14 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
         if not len(self.device_array):
             return CrossPyArray.fromobject([]).finish()
 
-        sum_device_array = {}
+        sum_device_array = {did: None for did in self.device_array}
         for did, array in self.device_array.items():
-            with context(array) as ctx:
-                sum_device_array[did] = array.sum(axis, dtype, out, keepdims)
-    
+            def device_local_sum():
+                with context(array) as ctx:
+                    sum_device_array[did] = array.sum(axis, dtype, out, keepdims)
+            launch(device_local_sum)
+        barrier()
+
         last_sum = sum_device_array[did]
         if axis is None or axis == self.axis:
             if out is not None:
@@ -898,10 +903,13 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
             raise NotImplementedError
             local_sums = self.devicewise_map(lambda a: a.sum(axis, dtype, out, keepdims))
             raise NotImplementedError("reduce the local results")
-        argmin_device_array = {}
+        argmin_device_array = {did: None for did in self.device_array}
         for did, array in self.device_array.items():
-            with context(array) as ctx:
-                argmin_device_array[did] = array.argmin(axis, dtype, out, keepdims)
+            def device_local_argmin():
+                with context(array) as ctx:
+                    argmin_device_array[did] = array.argmin(axis, dtype, out, keepdims)
+            launch(device_local_argmin)
+        barrier()
         last_argmin = argmin_device_array[did]
         return CrossPyArray(
             shape=(*self._shape[:axis], 1, *self._shape[axis + 1:]) if keepdims else (*self._shape[:axis], *self._shape[axis + 1:]),
@@ -1054,7 +1062,12 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                 gen = iter((did, context(self.device_array[did], stream=dict(non_blocking=True)), *(x.device_array[did] for x in inputs)) for did in self.device_array)
         else:
             gen = iter((did, context(block, stream=dict(non_blocking=True)), *inputs[:selfth], block, *inputs[selfth+1:]) for did, block in self.device_array.items())
-        per_device_result = {did: _call_with_context(ufunc, exec_ctx, *args) for did, exec_ctx, *args in gen}
+        per_device_result = {}
+        for did, exec_ctx, *args in gen:
+            def _device_local_kernel():
+                per_device_result[did] = _call_with_context(ufunc, exec_ctx, *args)
+            launch(_device_local_kernel)
+        barrier()
             # resbuf = deque((did, *_call_with_context(ufunc, block, *inputs[1:])) for did, block in left.device_array.items())
             # per_device_result = {}
             # while len(resbuf):

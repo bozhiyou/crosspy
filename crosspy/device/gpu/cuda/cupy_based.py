@@ -4,7 +4,9 @@ import cupy.cuda
 import crosspy
 from crosspy import context
 from crosspy import device
-from crosspy.device import Architecture, Device, get_device, MemoryKind, Memory
+from crosspy.device import get_device, MemoryKind, Memory, register_memory
+from crosspy.device.meta import Architecture, Device, DeviceMeta
+from crosspy.utils.array import ArrayType, register_array_type
 
 from abc import ABCMeta
 from contextlib import contextmanager, nullcontext
@@ -86,6 +88,8 @@ class CuPyCarrier:
             return
         raise TypeError(f"{type(src)} is not supported yet")
 
+
+
 @context.register(cupy)
 @contextmanager
 def cupy_context(obj, stream=None):
@@ -99,14 +103,14 @@ def cupy_context(obj, stream=None):
 
 
 class _DeviceCUPy:
-    def __init__(self, ctx: "_GPUDevice"):
-        self._ctx: "_GPUDevice" = ctx
+    def __init__(self, ctx: "GPUDevice"):
+        self._ctx: "GPUDevice" = ctx
 
     def __getattr__(self, item: str):
         v = getattr(cupy, item)
         if callable(v):
 
-            def _wrap_for_device(ctx: "_GPUDevice", f):
+            def _wrap_for_device(ctx: "GPUDevice", f):
                 @wraps(f)
                 def ff(*args, **kwds):
                     with ctx.cupy_device_context():
@@ -164,7 +168,7 @@ class _GPUMemory(Memory):
                 return target
 
 
-class _GPUDevice(Device, metaclass=ABCMeta):
+class GPUDevice(Device, metaclass=DeviceMeta):
     def __init__(self, architecture: "_GPUArchitecture", index, *args, **kwds):
         try:
             with cupy.cuda.Device(index) as self._d:
@@ -219,11 +223,11 @@ class _GPUDevice(Device, metaclass=ABCMeta):
 
 
 class _GPUArchitecture(Architecture):
-    _devices: list[_GPUDevice]
+    _devices: list[GPUDevice]
 
     def __init__(self, name, id):
         super().__init__(name, id)
-        self._devices = [_GPUDevice(self, device_id) for device_id in range(cupy.cuda.runtime.getDeviceCount())]
+        self._devices = [GPUDevice(self, device_id) for device_id in range(cupy.cuda.runtime.getDeviceCount())]
 
     @property
     def devices(self):
@@ -235,7 +239,23 @@ class _GPUArchitecture(Architecture):
     def __call__(self, index, *args, **kwds):
         return self._devices[index]
 
-_GPUDevice.register(cupy.cuda.Device)
+class _CuPyArrayType(ArrayType):
+    def can_assign_from(self, a, b):
+        # TODO: We should be able to do direct copies from numpy to cupy arrays, but it doesn't seem to be working.
+        # return isinstance(b, (cupy.ndarray, numpy.ndarray))
+        return isinstance(b, cupy.ndarray)
+
+    def get_memory(self, a):
+        return gpu(a.device.id).memory()
+
+    def get_array_module(self, a):
+        return cupy.get_array_module(a)
+
+register_memory(GPUDevice)(CuPyCarrier)
+register_array_type(cupy.ndarray)(_CuPyArrayType())
+
+GPUDevice.register(cupy.cuda.Device)
+
 gpu = _GPUArchitecture("GPU", "gpu")
 gpu.__doc__ = """Architecture for CUDA GPUs.
 

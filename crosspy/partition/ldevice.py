@@ -238,14 +238,13 @@ def split(array_like, distribution, axis=None, mode=None):
             # assert isinstance(device, Device), "inconsistent distribution element type"
             stop = start + subsize
             with device as ctx:
-                partitions.append(ctx.pull(array_like[start:stop]))
+                try:
+                    partitions.append(ctx.pull(array_like[start:stop]))
+                except AttributeError:
+                    from crosspy.device import get_memory
+                    ctx = get_memory(type(ctx))(stream=getattr(ctx, 'stream', None))
+                    partitions.append(ctx.pull(array_like[start:stop]))
             start = stop
-        # OLD IMPLEMENTATION
-        # from .ldevice import LDeviceSequenceBlocked
-        # Partitioner = LDeviceSequenceBlocked
-        # mapper = Partitioner(len(distribution), placement=distribution)
-        # arr_p = mapper.partition_tensor(array_like)
-        # return arr_p
         return partitions
     if isinstance(peeked, Integral):
         if distribution[len(distribution) - 1] == len(array_like):

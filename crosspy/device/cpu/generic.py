@@ -1,6 +1,6 @@
 import numpy
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Dict
 
 import os
@@ -8,8 +8,8 @@ import psutil
 
 import crosspy
 from crosspy import context
+from crosspy.device import Architecture, Memory, Device, MemoryKind
 from crosspy.utils import array
-from ..device import Architecture, Memory, Device, MemoryKind
 
 __all__ = ["cpu"]
 
@@ -49,7 +49,7 @@ class NumPyCarrier:
         if isinstance(src, numpy.ndarray):
             if out is not None:
                 if copy or (out is not src):
-                    out[:] = src
+                    out[...] = src
                 return src
             if copy:
                 return src.astype(src.dtype, copy=True)
@@ -59,16 +59,19 @@ class NumPyCarrier:
         from crosspy.device.gpu.cuda.cupy_based import _pinned_memory_empty_like
         if isinstance(src, cupy.ndarray):
             stream = kwargs.pop('stream', None)
-            res = _pinned_memory_empty_like(src) if out is None else out
+            src_ = _pinned_memory_empty_like(src) if out is None else out
             if stream is not None:
-                return src.get(stream=stream, out=res)
+                return src.get(stream=stream, out=src_)
             with src.device:
                 with cupy.cuda.Stream(non_blocking=True) as stream:
-                    src.get(stream=stream, out=res)
+                    src.get(stream=stream, out=src_)
                 stream.synchronize()
-            return res
+            return src_
         try:
-            return numpy.array(src)
+            src_ = numpy.array(src) if copy else numpy.asanyarray(src)
+            if out is not None:
+                out[...] = src_
+            return src_
         except BaseException:
             raise TypeError(f"{type(src)} is not supported yet")
 

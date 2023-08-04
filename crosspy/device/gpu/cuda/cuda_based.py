@@ -9,8 +9,8 @@ from typing import Dict, List
 import logging
 logger = logging.getLogger(__name__)
 
-from crosspy.device.device import Architecture
-from crosspy.device.device import MemoryKind, Memory, Architecture, Device
+from crosspy.device.meta import Architecture
+from crosspy.device.meta import MemoryKind, Memory, Architecture, Device
 
 import numpy
 
@@ -36,14 +36,14 @@ __all__ = ["gpu", "cuda"]
 
 
 class _DeviceCUPy:
-    def __init__(self, ctx: "_GPUDevice"):
-        self._ctx: "_GPUDevice" = ctx
+    def __init__(self, ctx: "GPUDevice"):
+        self._ctx: "GPUDevice" = ctx
 
     def __getattr__(self, item: str):
         v = getattr(cupy, item)
         if callable(v):
 
-            def _wrap_for_device(ctx: "_GPUDevice", f):
+            def _wrap_for_device(ctx: "GPUDevice", f):
                 @wraps(f)
                 def ff(*args, **kwds):
                     with ctx._device_context():
@@ -103,7 +103,7 @@ class _GPUMemory(Memory):
 
 # from ..environments import EnvironmentComponent  # for inheritance
 # from . import component
-class _GPUDevice(Device):
+class GPUDevice(Device):
     def __init__(self, architecture: "_GPUArchitecture", index, *args, **kwds):
         try:
             with cupy.cuda.Device(index) as d:
@@ -151,7 +151,7 @@ class _GPUDevice(Device):
 
 
 class _GPUArchitecture(Architecture):
-    _devices: List[_GPUDevice]
+    _devices: List[GPUDevice]
 
     def __init__(self, name, id):
         super().__init__(name, id)
@@ -171,7 +171,7 @@ class _GPUArchitecture(Architecture):
         return self._devices
 
     def __call__(self, index, *args, **kwds):
-        return _GPUDevice(self, index, *args, **kwds)
+        return GPUDevice(self, index, *args, **kwds)
 
 
 gpu = _GPUArchitecture("GPU", "cuda")

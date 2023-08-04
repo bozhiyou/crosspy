@@ -61,7 +61,7 @@ class _GPUStacksLocal(threading.local):
 
 class GPUComponentInstance(EnvironmentComponentInstance):
     _stack: _GPUStacksLocal
-    gpus: List["cuda._GPUDevice"]
+    gpus: List["cuda.GPUDevice"]
 
     def __init__(self, descriptor: "GPUComponent", env: TaskEnvironment):
         super().__init__(descriptor)
@@ -130,7 +130,7 @@ class GPUComponent(EnvironmentComponentDescriptor):
 
 
 class _GPULocals(threading.local):
-    _gpus: Optional[Collection["cuda._GPUDevice"]]
+    _gpus: Optional[Collection["cuda.GPUDevice"]]
 
     def __init__(self):
         super(_GPULocals, self).__init__()
@@ -146,7 +146,7 @@ class _GPULocals(threading.local):
 
 _gpu_locals = _GPULocals()
 
-from ..device import Device
+from ..meta import Device
 
 
 def get_gpus() -> Collection[Device]:
@@ -154,7 +154,7 @@ def get_gpus() -> Collection[Device]:
 
 
 class MultiGPUComponentInstance(EnvironmentComponentInstance):
-    gpus: List["cuda._GPUDevice"]
+    gpus: List["cuda.GPUDevice"]
 
     def __init__(self, descriptor: "MultiGPUComponent", env: TaskEnvironment):
         super().__init__(descriptor)

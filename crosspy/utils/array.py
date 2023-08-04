@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 import numpy, numpy as np
 
-from crosspy.device import device
+from crosspy.device import Memory
 from crosspy.utils import get_module
 
 __all__ = [
@@ -42,7 +42,7 @@ def asnumpy(a):
             return getattr(ar, "asnumpy")(a)
     except KeyError:
         pass  # numpy.int64
-    return np.asarray(a)
+    return np.asanyarray(a)
 
 
 class ArrayType(metaclass=ABCMeta):
@@ -94,7 +94,7 @@ def can_assign_from(a, b):
     return _array_types[type(a)].can_assign_from(a, b)
 
 
-def get_memory(a) -> "device.Memory":
+def get_memory(a) -> "Memory":
     """
     :param a: An array object.
     :return: A memory in which `a` is stored.

@@ -120,25 +120,7 @@ def array(
     return inner(obj, axis=axis)
 
 def asnumpy(input: CrossPyArray):
-    return numpy.asarray(input)
-
-def zeros(shape, distribution):
-    """
-    Only support 1-D distribution.
-    """
-    if not isinstance(shape, (tuple, list)):
-        shape = (shape,)
-    n_parts = len(distribution)
-    axis = 0
-    sub_shapes = [(*shape[:axis], shape[axis] // n_parts, *shape[axis + 1:]) for _ in range(n_parts)]
-    if shape[0] != shape[0] // n_parts * n_parts:
-        sub_shapes[-1] = (*shape[:axis], n_parts - shape[0] // n_parts * (n_parts - 1), *shape[axis + 1:])
-    def array_gen(i: int):
-        if isinstance(distribution[i], gpu(0).__class__): # TODO this is an ugly check
-            with distribution[i].cupy_device:
-                return distribution[i].get_array_module().zeros(sub_shapes[i])
-        return distribution[i].get_array_module().zeros(sub_shapes[i])
-    return CrossPyArray.fromobject([array_gen(i) for i in range(n_parts)], axis=0).finish()
+    return numpy.asanyarray(input)
 
 def to(input, device: int):
     """

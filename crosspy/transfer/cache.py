@@ -5,7 +5,7 @@ import numpy
 from crosspy import cupy
 from crosspy.utils.cupy import _pin_memory, _pinned_memory_empty_like
 
-from crosspy.device import get_device, _CPUDevice, _GPUDevice
+from crosspy.device import get_device, _CPUDevice, GPUDevice
 
 # device_cache = defaultdict(dict)
 # Two objects with non-overlapping lifetimes may have the same id() value.
@@ -52,7 +52,7 @@ def pull(array, context, stream_src=None):
     # to CPU
     if isinstance(context, _CPUDevice):
         src_dev = get_device(array)
-        if isinstance(src_dev, _GPUDevice):  # GPU to CPU
+        if isinstance(src_dev, GPUDevice):  # GPU to CPU
             with src_dev:
                 with cupy.cuda.Stream(non_blocking=True) as stream:
                     membuffer = _pinned_memory_empty_like(array)
@@ -62,7 +62,7 @@ def pull(array, context, stream_src=None):
         return array  # CPU to CPU
 
     # to GPU
-    assert isinstance(context, _GPUDevice)
+    assert isinstance(context, GPUDevice)
     with context:
         membuffer = cupy.empty(array.shape, dtype=array.dtype)
         with cupy.cuda.Stream(non_blocking=True) as stream_dst:

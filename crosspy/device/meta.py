@@ -3,7 +3,13 @@ from functools import lru_cache
 from typing import Optional, Dict, Iterable
 from abc import ABCMeta, abstractmethod
 
+from crosspy.device import register_memory, get_memory
 from .memory import Memory, MemoryKind
+
+class DeviceMeta(ABCMeta):
+    def register(cls, subclass):
+        super().register(subclass)
+        register_memory(subclass)(get_memory(cls))
 
 class Device(nullcontext, metaclass=ABCMeta):
     """

@@ -9,3 +9,9 @@ def get_module(obj, default=None):
     if m:
         return m
     raise ModuleNotFoundError("No module for object of type %s" % type(obj))
+
+def tuplize(obj):
+    try:
+        return (*obj,)
+    except TypeError:
+        return (obj,)
