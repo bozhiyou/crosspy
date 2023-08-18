@@ -14,16 +14,26 @@ https://github.com/pypa/sampleproject
 # Step 3:
 # pip install -U --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ crosspy
 
-VERSION = '0.0.0a3.dev26'
+VERSION = '0.0.0a3.dev62'  # release # SKIP 64?
+# VERSION = '0.0.0a3.dev67'  # test
 
+from pybind11.setup_helpers import Pybind11Extension, build_ext
 # Always prefer setuptools over distutils
 from setuptools import setup, find_packages
+from setuptools.glob import glob
 import pathlib
 
-here = pathlib.Path(__file__).parent.resolve()
 
 # Get the long description from the README file
+here = pathlib.Path(__file__).parent.resolve()
 long_description = (here / 'README.md').read_text(encoding='utf-8')
+
+# extension modules
+m_profiler = Pybind11Extension(
+            name="crosspy.utils.profile",  # as it would be imported; may include packages/namespaces separated by `.`
+            sources=[*glob("crosspy/utils/profile/src/*.cpp")],  # all sources are compiled into a single binary file
+            include_dirs=["crosspy/utils/profile/include"]
+        )
 
 # Arguments marked as "Required" below must be included for upload to PyPI.
 # Fields marked as "Optional" may be commented out.
@@ -143,11 +153,16 @@ setup(
     #
     packages=find_packages(where='.'),  # Required
 
+    ext_modules=[
+        m_profiler,
+    ],
+    cmdclass={"build_ext": build_ext},
+
     # Specify which Python versions you support. In contrast to the
     # 'Programming Language' classifiers above, 'pip install' will check this
     # and refuse to install the project if the version does not match. See
     # https://packaging.python.org/guides/distributing-packages-using-setuptools/#python-requires
-    python_requires='>=3.8, <4',
+    python_requires='>=3.8',  # <3.11',
 
     # This field lists other packages that your project depends on to run.
     # Any package you put here will be installed by pip when your project is
@@ -155,7 +170,7 @@ setup(
     #
     # For an analysis of "install_requires" vs pip's requirements files see:
     # https://packaging.python.org/discussions/install-requires-vs-requirements/
-    install_requires=['numpy'],  # Optional
+    install_requires=['numpy>=1.15.0'],  # Optional
 
     # List additional groups of dependencies here (e.g. development
     # dependencies). Users will be able to install these using the "extras"

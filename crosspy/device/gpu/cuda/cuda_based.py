@@ -1,19 +1,6 @@
 """
 pip install cuda-python
 """
-from contextlib import contextmanager
-from functools import wraps, lru_cache
-from math import log2
-from typing import Dict, List
-
-import logging
-logger = logging.getLogger(__name__)
-
-from crosspy.device.meta import Architecture
-from crosspy.device.meta import MemoryKind, Memory, Architecture, Device
-
-import numpy
-
 from cuda import cuda, nvrtc
 cuda.cuInit(0)
 
@@ -26,11 +13,27 @@ def ASSERT_DRV(err):
             raise RuntimeError("Nvrtc Error: {}".format(err))
     else:
         raise RuntimeError("Unknown error type: {}".format(err))
-    
+
 def ERRCHK(res):
     err, *res = res
     ASSERT_DRV(err)
     return res if len(res) > 1 else res[0]
+
+from contextlib import contextmanager
+from functools import wraps, lru_cache
+import os
+
+import numpy
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+from crosspy.device import MemoryKind, Memory
+from crosspy.device.meta import Architecture, Device
+
+
+
 
 __all__ = ["gpu", "cuda"]
 
@@ -106,16 +109,18 @@ class _GPUMemory(Memory):
 class GPUDevice(Device):
     def __init__(self, architecture: "_GPUArchitecture", index, *args, **kwds):
         try:
-            with cupy.cuda.Device(index) as d:
-                with cupy.cuda.Stream(non_blocking=True):
-                    cupy.cuda.alloc(2 ** min(30, int(log2(d.mem_info[0]))))
-        except Exception as e:
+            with cupy.cuda.Device(index) as self._d:
+                with cupy.cuda.Stream(non_blocking=True) as self._s:
+                    if os.getenv('CUPY_INIT_MEMPOOL', '1') not in ('0', 'false', 'False'):
+                        # TODO config prealloc
+                        cupy.cuda.alloc(self._d.mem_info[0] & ~((1 << 30) - 1))  # maximize prealloc to GB
+        except cupy.cuda.runtime.CUDARuntimeError as e:
             raise RuntimeError(e.args[0] + " %d" % index)
         super().__init__(architecture, index, *args, **kwds)
 
     @property
     @lru_cache(None)
-    def resources(self) -> Dict[str, float]:
+    def resources(self) -> dict[str, float]:
         dev = cupy.cuda.Device(self.index)
         free, total = dev.mem_info
         attrs = dev.attributes
@@ -151,27 +156,22 @@ class GPUDevice(Device):
 
 
 class _GPUArchitecture(Architecture):
-    _devices: List[GPUDevice]
+    _devices: list[GPUDevice]
 
     def __init__(self, name, id):
         super().__init__(name, id)
-        devices = []
-        for device_id in range(ERRCHK(cuda.cuDeviceGetCount())):
-            cupy_device = ERRCHK(cuda.cuDeviceGet(device_id))
-            try:
-                cupy_device.compute_capability
-            except cupy.cuda.runtime.CUDARuntimeError:
-                break
-            assert cupy_device.id == device_id
-            devices.append(self(cupy_device.id))
-        self._devices = devices
+        self._devices = [
+            GPUDevice(self, ERRCHK(cuda.cuDeviceGet(device_id)).id) for device_id in range(ERRCHK(cuda.cuDeviceGetCount()))]
 
     @property
     def devices(self):
         return self._devices
 
+    def __getitem__(self, index):
+        return self._devices[index]
+
     def __call__(self, index, *args, **kwds):
-        return GPUDevice(self, index, *args, **kwds)
+        return self._devices[index]
 
 
 gpu = _GPUArchitecture("GPU", "cuda")

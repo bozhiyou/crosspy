@@ -1,0 +1,12 @@
+# Contents of sdist. See also `setup.py`.
+recursive-include crosspy *.h *.hpp
+recursive-include crosspy *.pyx *.pxd *.pxi
+
+# Fail-safe to avoid including Cythoinzed sources in sdist.
+recursive-exclude crosspy *.c *.cpp
+
+# Tests
+# recursive-include tests *.py
+
+# Licenses
+include LICENSE

@@ -231,7 +231,12 @@ def split(array_like, distribution, axis=None, mode=None):
             # assert isinstance(device, Device), "inconsistent distribution element type"
             stop = start + subsize + 1
             with device as ctx:
-                partitions.append(ctx.pull(array_like[start:stop]))
+                try:
+                    partitions.append(ctx.pull(array_like[start:stop]))
+                except AttributeError:
+                    from crosspy.device import get_memory
+                    ctx = get_memory(type(ctx))(stream=getattr(ctx, 'stream', None))
+                    partitions.append(ctx.pull(array_like[start:stop]))
             start = stop
         for i in range(nbalance, nparts):
             device = distribution[i]

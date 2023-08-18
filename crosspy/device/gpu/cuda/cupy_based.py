@@ -1,15 +1,7 @@
 import cupy
 import cupy.cuda
 
-import crosspy
-from crosspy import context
-from crosspy import device
-from crosspy.device import get_device, MemoryKind, Memory, register_memory
-from crosspy.device.meta import Architecture, Device, DeviceMeta
-from crosspy.utils.array import ArrayType, register_array_type
-
-from abc import ABCMeta
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from functools import wraps, lru_cache
 import os
 
@@ -18,6 +10,13 @@ import numpy
 import logging
 
 logger = logging.getLogger(__name__)
+
+import crosspy
+from crosspy import context
+from crosspy import device
+from crosspy.device import get_device, MemoryKind, Memory, register_memory
+from crosspy.device.meta import Architecture, Device, DeviceMeta
+from crosspy.utils.array import ArrayType, register_array_type
 
 
 __all__ = ["gpu", "cupy"]
@@ -173,7 +172,7 @@ class GPUDevice(Device, metaclass=DeviceMeta):
         try:
             with cupy.cuda.Device(index) as self._d:
                 with cupy.cuda.Stream(non_blocking=True) as self._s:
-                    if os.getenv('CUPY_INIT_MEMPOOL', '1') not in ('0', 'false', 'False'):
+                    if os.getenv('CUPY_INIT_MEMPOOL', '1').lower() not in ('0', 'false'):
                         # TODO config prealloc
                         cupy.cuda.alloc(self._d.mem_info[0] & ~((1 << 30) - 1))  # maximize prealloc to GB
         except cupy.cuda.runtime.CUDARuntimeError as e:
@@ -184,14 +183,17 @@ class GPUDevice(Device, metaclass=DeviceMeta):
         self._s.synchronize()
         self._d.synchronize()
 
+    def __getattr__(self, name):
+        return getattr(self._d, name)
+
     @property
     def cupy_device(self):
-        return cupy.cuda.Device(self.index)
+        return self._d
 
     @property
     @lru_cache(None)
     def resources(self):
-        dev = cupy.cuda.Device(self.index)
+        dev = self._d
         free, total = dev.mem_info
         attrs = dev.attributes
         threads = attrs["MultiProcessorCount"] * attrs["MaxThreadsPerMultiProcessor"]
@@ -211,7 +213,7 @@ class GPUDevice(Device, metaclass=DeviceMeta):
 
     def __repr__(self):
         return "<CUDA {}>".format(self.index)
-    
+
     def __enter__(self):
         self._d.__enter__()
         self._s.__enter__()
@@ -227,15 +229,19 @@ class _GPUArchitecture(Architecture):
 
     def __init__(self, name, id):
         super().__init__(name, id)
-        self._devices = [GPUDevice(self, device_id) for device_id in range(cupy.cuda.runtime.getDeviceCount())]
+        self._devices = [
+            GPUDevice(self, device_id) for device_id in range(cupy.cuda.runtime.getDeviceCount())]
 
     @property
     def devices(self):
         return self._devices
+    
+    def __iter__(self):
+        return iter(self._devices)
 
     def __getitem__(self, index):
         return self._devices[index]
-    
+
     def __call__(self, index, *args, **kwds):
         return self._devices[index]
 

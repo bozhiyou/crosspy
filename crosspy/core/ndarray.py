@@ -525,7 +525,8 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                                 per_device_result[did] = array[(*index[:self.axis], bools, *index[self.axis+1:])]
                     launch(device_local_masking)
                 barrier()
-                return CrossPyArray.fromobject([per_device_result[did] for did in self._metadata.device_idx], axis=self._concat_axis if len(per_device_result) else None).finish()
+                ordered_blocks = [per_device_result[did] for did in self._metadata.device_idx if did in per_device_result]
+                return CrossPyArray.fromobject(ordered_blocks, axis=self._concat_axis if len(ordered_blocks) else None).finish()
 
         # FIXME: ad hoc for 1-D
         if self._concat_axis == 0:
