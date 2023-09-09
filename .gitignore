@@ -6,6 +6,10 @@ tests/data
 # Benchmarking
 benchmarks/.asv
 
+# Nvidia profiling reports
+*.nsys-rep
+*.qdrep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
