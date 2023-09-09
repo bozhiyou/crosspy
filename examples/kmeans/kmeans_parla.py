@@ -9,7 +9,7 @@ parser.add_argument("-num_gpus", "-g", type=int, default=2, help="number of GPUs
 parser.add_argument("-it", type=int, default=20, help="number of iterations")
 parser.add_argument("--warmup", type=int, default=2, help="number of warmup iterations")
 parser.add_argument("--verbose", "-v", default=False, action='store_true', help="verbose output")
-parser.add_argument("--test", default=False, action='store_true', help="verbose output")
+parser.add_argument("--test", default=False, action='store_true', help="use static test input")
 args = parser.parse_args()
 
 import numpy as np
@@ -21,15 +21,19 @@ from parla.common.globals import get_current_context
 from parla.cython.device_manager import gpu
 
 import crosspy as xp
+from crosspy.utils import Timer
 from crosspy.device import GPUDevice
 import crosspy.dispatcher
 
 GPUDevice.register(GPUEnvironment)
 crosspy.dispatcher.set(spawn, AtomicTaskSpace("CrossPy"))
 
+tdistance = Timer()
+targmin = Timer()
+tnewcent = Timer()
+
 from sklearn.datasets import make_blobs
 from sklearn.metrics.cluster import homogeneity_score
-
 
 def main():
     if args.verbose:
@@ -70,19 +74,25 @@ def main():
         for j in range(args.it):
             if j == args.warmup: tic = time.perf_counter()
             if args.verbose: print('kmeans iteration', j)
+            if j >= args.warmup: tdistance.start()
             for k in range(args.nc):
-                W = X - C[k, :]
+                W[:] = X - C[k, :]
                 D[:, k] = cp.sum(W * W, axis=1)
+            if j >= args.warmup: tdistance.stop()
 
+            if j >= args.warmup: targmin.start()
             L = cp.argmin(D, axis=1)
-            if j == 0: L0 = L
+            if j >= args.warmup: targmin.stop()
+            if j == 0: L0[:] = L
 
+            if j >= args.warmup: tnewcent.start()
             for k in range(args.nc):
                 m = cp.sum(L == k)
                 # with m.device:
                 #     assert m.item() != 0, "centers should be unique; repetition: %s in %s" % (cpos[k], cpos)
                 ck = 1 / m * cp.sum(X[L == k, :], axis=0)
                 C[k, :] = ck
+            if j >= args.warmup: tnewcent.stop()
         toc = time.perf_counter()
 
         L0h = xp.asnumpy(L0)
@@ -100,7 +110,8 @@ def main():
         print(f'homogeneity score = {sc:.2} (1 is best)')
 
         print(
-            f'Kmeans took {toc-tic:.3} seconds, {(toc-tic) / (args.it - args.warmup):.3} per iteration'
+            f'Kmeans took {toc-tic:.3} seconds, {(toc-tic) / (args.it - args.warmup):.3} per iteration',
+            f"({tdistance.get() / (args.it - args.warmup):.3f} {targmin.get() / (args.it - args.warmup):.3f} {tnewcent.get() / (args.it - args.warmup):.3f})"
         )
 
 

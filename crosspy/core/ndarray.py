@@ -277,7 +277,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
     @property
     def ndevices(self) -> int:
         return len(self.device_array)
-    
+
     @property
     def ndev(self) -> int:  # alias to mimic `ndim`
         return len(self.device_array)
@@ -300,11 +300,18 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
             return list(self._metadata.block_offset)
         return list(self._shape)
 
-    def __iter__(self): ...  # TODO
+    def __iter__(self):
+        raise NotImplementedError  # TODO
 
     @property
     def axis(self):
         return self._concat_axis
+
+    @property
+    def canonical(self):
+        if len(self.device_array):
+            return next(iter(self.device_array.values()))
+        return None
 
     @property
     def device(self) -> list:
@@ -514,7 +521,7 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                     raise NotImplementedError("boolean index array distribution mismatch")
                 if not self.one_block_per_device:
                     raise NotImplementedError("Need blockwise implemenation")
-                
+
                 per_device_result = {}
                 for did, array in self.device_array.items():
                     bools = xbools.device_array[did]
@@ -720,9 +727,13 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
             if self.metadata == value.metadata:
                 if slice_.start in (0, None) and slice_.stop in (self.shape[self.axis], None):
                     for did, array in self.device_array.items():
-                        with context(array) as ctx:
-                            # TODO: Unpack operator in subscript is supported in Python>=3.11
-                            array[(*index[:self.axis], slice(None), *index[self.axis + 1:])] = value.device_array[did]
+                        def _device_local_assignment():
+                            with context(array) as ctx:
+                                # TODO: use ctx copy
+                                # TODO: Unpack operator in subscript is supported in Python>=3.11
+                                array[(*index[:self.axis], slice(None), *index[self.axis + 1:])] = value.device_array[did]
+                        launch(_device_local_assignment)
+                    barrier()
                     return
 
             interal_bounds = self._metadata.block_offset[(slice_.start < self._metadata.block_offset) & (self._metadata.block_offset <= slice_.stop)] - slice_.start
@@ -838,25 +849,19 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                 _local_assignment(v, local_indices, value, source_indices)
 
     def __getattr__(self, name):
-        if self._concat_axis is None and self._metadata is not None:
-            obj = self._original_data
-        elif self.nparts == 1:
-            assert len(self.device_array) == 1
-            obj = next(iter(self.device_array.values()))
-        else:
-            raise AttributeError("'%s' object has no attribute '%s'" % (type(self).__name__, name))
+        obj = self.canonical
         try:
             return getattr(obj, name)
         except AttributeError as e:
+            # raise AttributeError("'%s' object has no attribute '%s'" % (type(self).__name__, name))
             e_obj = e
         try:
             from crosspy.utils.array import get_array_module
             libfunc = getattr(get_array_module(obj), name)
-            return lambda *a, **kw: libfunc(obj, *a, **kw)
         except AttributeError as e_lib:
             e_lib.args = (e_obj.args[0] + '; ' + e_lib.args[0],)
             raise e_lib
-        raise AttributeError("'%s' object has no attribute '%s'" % (type(self).__name__, name))
+        return lambda *a, **kw: libfunc(obj, *a, **kw)
 
     ########
     # umath
@@ -1069,12 +1074,12 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                 per_device_result[did] = _call_with_context(ufunc, exec_ctx, *args)
             launch(_device_local_kernel)
         barrier()
-            # resbuf = deque((did, *_call_with_context(ufunc, block, *inputs[1:])) for did, block in left.device_array.items())
-            # per_device_result = {}
-            # while len(resbuf):
-            #     did, res, ctx  = resbuf.popleft()
-            #     del ctx
-            #     per_device_result[did] = res
+        # resbuf = deque((did, *_call_with_context(ufunc, block, *inputs[1:])) for did, block in left.device_array.items())
+        # per_device_result = {}
+        # while len(resbuf):
+        #     did, res, ctx  = resbuf.popleft()
+        #     del ctx
+        #     per_device_result[did] = res
         return CrossPyArray(self._shape, next(iter(per_device_result.values())).dtype, self._metadata, per_device_result, self._concat_axis)  # TODO ...
 
         try:
@@ -1090,10 +1095,88 @@ class CrossPyArray(numpy.lib.mixins.NDArrayOperatorsMixin):
                 raise NotImplementedError("%s has not been implemented yet" % ufunc)
         return CrossPyArray.fromobject(per_block_result, axis=left.heteroaxis).finish()
 
+    @property
+    def __array_interface__(self):
+        """[The array interface protocol](https://numpy.org/doc/stable/reference/arrays.interface.html#python-side)
+
+        A dictionary of items (3 required and 5 optional).
+        The optional keys in the dictionary have implied defaults
+        if they are not provided.
+        """
+        shape: tuple[int] = self.shape
+
+        canonical = next(iter(self.device_array.values()))
+        # TODO check empty
+        # TODO check numpy.ndarray
+        typestr = canonical.dtype.str
+        descr: list[tuple] = canonical.dtype.descr
+        version: int = canonical.__array_interface__['version']
+        return dict(
+            shape=shape,
+            typestr=typestr,
+            version=version
+        )
 
     @property
     def __cuda_array_interface__(self):
-        raise NotImplementedError
+        """
+        https://numba.pydata.org/numba-doc/dev/cuda/cuda_array_interface.html
+        https://numba.readthedocs.io/en/stable/cuda/cuda_array_interface.html
+
+        Python Interface Specification
+
+        Note
+
+        Experimental feature. Specification may change.
+        The __cuda_array_interface__ attribute returns a dictionary (dict) that must contain the following entries:
+
+        shape: (integer, ...)
+
+            A tuple of int (or long) representing the size of each dimension.
+        typestr: str
+
+            The type string. This has the same definition as typestr in the numpy array interface.
+        data: (integer, boolean)
+
+            The data is a 2-tuple. The first element is the data pointer as a Python int (or long). The data must be device-accessible. For zero-size arrays, use 0 here.
+            The second element is the read-only flag as a Python bool.
+
+            Because the user of the interface may or may not be in the same context, the most common case is to use cuPointerGetAttribute with CU_POINTER_ATTRIBUTE_DEVICE_POINTER in the CUDA driver API (or the equivalent CUDA Runtime API) to retrieve a device pointer that is usable in the currently active context.
+            version: integer
+
+            An integer for the version of the interface being exported. The current version is 2.
+
+        The following are optional entries:
+
+        strides: None or (integer, ...)
+
+        If strides is not given, or it is None, the array is in C-contiguous layout. Otherwise, a tuple of int (or long) is explicitly given for representing the number of bytes to skip to access the next element at each dimension.
+        descr
+
+        This is for describing more complicated types. This follows the same specification as in the numpy array interface.
+        mask: None or object exposing the __cuda_array_interface__
+
+        If None then all values in data are valid. All elements of the mask array should be interpreted only as true or not true indicating which elements of this array are valid. This has the same definition as mask in the numpy array interface.
+
+        Note
+
+        Numba does not currently support working with masked CUDA arrays and will raise a NotImplementedError exception if one is passed to a GPU function.
+        """
+        shape: tuple[int] = self.shape
+
+        canonical = next(iter(self.device_array.values()))
+        # TODO check empty
+        # TODO check cupy.ndarray
+        typestr: str = canonical.dtype.str
+        # optional
+        descr: list[tuple] = canonical.dtype.descr
+
+        data: int = canonical.__cuda_array_interface__['data']
+        return dict(
+            shape=self.shape,
+            typestr=typestr,
+            data=data,
+        )
 
     ########
     # map/reduce
