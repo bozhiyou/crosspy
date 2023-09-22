@@ -9,7 +9,7 @@ parser.add_argument("-num_gpus", "-g", type=int, default=2, help="number of GPUs
 parser.add_argument("-it", type=int, default=20, help="number of iterations")
 parser.add_argument("--warmup", type=int, default=2, help="number of warmup iterations")
 parser.add_argument("--verbose", "-v", default=False, action='store_true', help="verbose output")
-parser.add_argument("--test", default=True, action='store_true', help="use static test input")
+parser.add_argument("--test", default=False, action='store_true', help="use static test input")
 args = parser.parse_args()
 
 import numpy as np
@@ -23,9 +23,11 @@ from parla.cython.device_manager import gpu
 import crosspy as xp
 from crosspy.utils import Timer
 from crosspy.device import GPUDevice
+import crosspy.dispatcher
 
 GPUDevice.register(GPUEnvironment)
 T = AtomicTaskSpace("CrossPy")
+crosspy.dispatcher.set(spawn, AtomicTaskSpace("CrossPy"))
 
 tdistance = Timer()
 targmin = Timer()
@@ -166,7 +168,7 @@ def main():
         print(f'number of clusters = {args.nc}')
 
     @spawn(placement=[tuple(gpu(i) for i in range(args.num_gpus))])
-    def _():
+    async def _():
         context = get_current_context()
         if args.verbose: print('Generating data')
         if args.test:
@@ -200,60 +202,70 @@ def main():
             if j == args.warmup: tic = time.perf_counter()
             if args.verbose: print('kmeans iteration', j)
             if j >= args.warmup: tdistance.start()
+            dT = AtomicTaskSpace(f"distance_{j}")
             for k in range(args.nc):
                 c = C[k]
                 for x, w, d in zip(X.block_view(), W.block_view(), D.block_view()):
-                    with x.device:
-                        with cp.cuda.Stream(non_blocking=True) as s:
-                            c_ = cp.empty_like(c)
-                            c_.data.copy_from_device_async(c.data, c.nbytes, stream=s)
-                            ks = cuda.external_stream(s.ptr)
-                            k_distance[math.ceil(x.shape[0] / 32), 32, ks](x, c_, w, d[:, k])
-                        s.synchronize()
+                    @spawn(dT[len(dT)], placement=[gpu(x.device.id)])
+                    def _():
+                        with x.device:
+                            with cp.cuda.Stream(non_blocking=True) as s:
+                                c_ = cp.empty_like(c)
+                                c_.data.copy_from_device_async(c.data, c.nbytes, stream=s)
+                                ks = cuda.external_stream(s.ptr)
+                                k_distance[math.ceil(x.shape[0] / 32), 32, ks](x, c_, w, d[:, k])
+                            s.synchronize()
                 # W[:] = X - C[k, :]
                 # D[:, k] = cp.sum(W * W, axis=1)
+            await dT
             if j >= args.warmup: tdistance.stop()
 
             if j >= args.warmup: targmin.start()
+            mT = AtomicTaskSpace(f"cluster_{j}")
             for l, d in zip(L.block_view(), D.block_view()):
-                with d.device:
-                    with cp.cuda.Stream(non_blocking=True) as s:
-                        ks = cuda.external_stream(s.ptr)
-                        k_argmin_axis1[math.ceil(x.shape[0] / 32), 32, ks](d, l)
+                @spawn(mT[len(mT)], placement=[gpu(d.device.id)])
+                def _():
+                    with d.device:
+                        with cp.cuda.Stream(non_blocking=True) as s:
+                            ks = cuda.external_stream(s.ptr)
+                            k_argmin_axis1[math.ceil(x.shape[0] / 32), 32, ks](d, l)
+                        s.synchronize()
+            await mT
             # L[:] = cp.argmin(D, axis=1)
             if j >= args.warmup: targmin.stop()
             if j == 0: L0[:] = L
 
             if j >= args.warmup: tnewcent.start()
+            cT = AtomicTaskSpace(f"center_{j}")
             for k in range(args.nc):
                 M = (L == k)
                 XM = X[M, :]
-                m = 0
-                for m_ in M.block_view():
-                    with m_.device:
-                        m += sum_1d(m_)
+                m = [0 for _ in range(M.nparts)]
+                for i, m_ in enumerate(M.block_view()):
+                    @spawn(cT[len(cT)], placement=[gpu(m_.device.id)])
+                    def _():
+                        with m_.device:
+                            m[i] = sum_1d(m_)
+                await cT
+                m = sum(m)
                 # m = cp.sum(M)
                 # with m.device:
                 #     assert m.item() != 0, "centers should be unique; repetition: %s in %s" % (cpos[k], cpos)
                 ck = cp.zeros_like(C[k, :])
-                for xm in XM.block_view():
-                    with xm.device:
-                        ck_ = sum_2d_axis0(xm)
-                    with ck.device:
-                        ck += cp.asarray(ck_)
+                res = [0 for _ in range(XM.nparts)]
+                for i, xm in enumerate(XM.block_view()):
+                    @spawn(cT[len(cT)], placement=[gpu(xm.device.id)])
+                    def _():
+                        with xm.device:
+                            ck_ = sum_2d_axis0(xm)
+                        with ck.device:
+                            res[i] = cp.asarray(ck_)
+                await cT
+                for x in res:
+                    ck += x
                 ck = 1 / m * ck
                 # ck = 1 / m * cp.sum(XM, axis=0)
                 C[k, :] = ck
-            # @cuda.jit
-            # def k_average(xr, lr, cr):
-            #     t = cuda.grid(1)
-            #     if t < dr.shape[0]:
-            #         lr[t] = 0
-            #         v = dr[t, 0]
-            #         for i in range(1, dr.shape[1]):
-            #             if dr[t, i] < v:
-            #                 lr[t] = i
-            #                 v = dr[t, i]
             if j >= args.warmup: tnewcent.stop()
         toc = time.perf_counter()
 
