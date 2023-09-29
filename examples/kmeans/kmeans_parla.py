@@ -81,7 +81,7 @@ def main():
             if j >= args.warmup: tdistance.stop()
 
             if j >= args.warmup: targmin.start()
-            L = cp.argmin(D, axis=1)
+            L[:] = cp.argmin(D, axis=1)
             if j >= args.warmup: targmin.stop()
             if j == 0: L0[:] = L
 
