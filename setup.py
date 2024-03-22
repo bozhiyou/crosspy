@@ -5,7 +5,8 @@ https://packaging.python.org/guides/distributing-packages-using-setuptools/
 https://github.com/pypa/sampleproject
 """
 # Step 1:
-# python setup.py sdist
+# python -m build
+# [DEPRECATED] python setup.py sdist
 
 # Step 2:
 # twine upload --repository testpypi dist/*
@@ -14,7 +15,7 @@ https://github.com/pypa/sampleproject
 # Step 3:
 # pip install -U --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ crosspy
 
-VERSION = '0.0.0a3.dev62'  # release # SKIP 64?
+VERSION = '0.0.0a3.dev73'  # release
 # VERSION = '0.0.0a3.dev67'  # test
 
 from pybind11.setup_helpers import Pybind11Extension, build_ext

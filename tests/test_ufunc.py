@@ -1,9 +1,12 @@
-from prerequisites import *
+import numpy, numpy as np
+import cupy, cupy as cp
+import crosspy, crosspy as xp
 
 def test_arithmetics():
     a = xp.array([np.arange(3), cp.arange(3)], axis=0)
     c = a + a
     print(c)
+    a[0] = a[2] + a[4]  # test dependency on indexing
 
 def test_equation():
     npa = np.arange(3)

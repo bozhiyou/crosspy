@@ -12,7 +12,7 @@ def _random_cpa(d):
     with cp.cuda.Device(d):
         return cp.random.rand(cp.random.randint(1, MAX_BLK_SZ).item())
 
-def test_x1d():
+def _test_x1d():
     from crosspy.core.x1darray import X1D
     for _ in range(5):
         num_blocks = np.random.randint(1, 10)

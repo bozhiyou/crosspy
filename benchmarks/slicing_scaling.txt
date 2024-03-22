@@ -1,0 +1,10 @@
+# x: crosspy array
+# ci: indices to gather
+# z = x[ci]
+
+# density = 0.01
+# Matrix size 40000-by-40000 with nnz=16000000 non zero values
+n,p,t
+40000,1,0.0253
+40000,2,0.0276
+40000,4,0.0281

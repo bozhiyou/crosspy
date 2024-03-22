@@ -1,0 +1,55 @@
+# https://packaging.python.org/en/latest/guides/writing-pyproject-toml
+
+[project]
+name="crosspy"
+version="0.0.0a3.dev79"
+authors = [
+  {name = "Bozhi YOU", email = "youbozhi@cs.utexas.edu"}
+]
+dependencies = [
+    "numpy>=1.17",
+    # "cupy>=6",
+    "psutil"
+]
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[build-system]
+requires = [
+    "scikit-build-core",
+    # "setuptools>=42",
+    "pybind11",
+]
+build-backend = "scikit_build_core.build"
+# build-backend = "setuptools.build_meta"
+
+[tool.scikit-build]
+logging.level = "INFO"
+cmake.source-dir = "src/crosspy"
+cmake.verbose = true
+cmake.build-type = "Release"
+sdist.cmake = true
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = ["--import-mode=importlib"]
+testpaths = ["tests"]
+
+[tool.tox]
+legacy_tox_ini = """
+[tox]
+min_version = 4.0
+env_list = 
+    py{310}
+
+[testenv]
+deps = 
+    pytest
+    cupy
+commands = 
+    pytest tests
+"""

@@ -3,6 +3,27 @@ A Python library that provides heterogeneous array interface with interoperabili
 
 Temporary documentation at https://users.oden.utexas.edu/~byou/crosspy/
 
+## Installation
+
+### From PyPI
+```
+pip install -U crosspy
+```
+
+### From Source
+```
+pip install .
+```
+
+# Design
+A CrossPy array is a composition of "morphous" objects.
+Morphous objects include scalars and "shape" attributed objects.
+
+Some operations are block aware: sample sort
+some are block agnostic
+
+# Legacy content
+
 ** ND-array: single node: multigpu, (also multi-numa, and hybrid)
 + support copy from-to cupy, numpy arrays with slicing
   x = parray
@@ -37,3 +58,5 @@ comparison:
 same in values
 same in structure
 same in devices
+
+"dynamic module does not define module export function" -> check pybind name and setup name consistency
